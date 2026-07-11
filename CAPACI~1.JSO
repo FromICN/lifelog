@@ -1,0 +1,11 @@
+{
+  "appId": "com.fromicn.lifelog",
+  "appName": "LifeLog",
+  "webDir": "dist",
+  "plugins": {
+    "FirebaseAuthentication": {
+      "skipNativeAuth": false,
+      "providers": ["google.com"]
+    }
+  }
+}
