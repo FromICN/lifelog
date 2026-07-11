@@ -1,41 +1,20 @@
-# LifeLog
+# LifeLog — 에디토리얼 크림 디자인 적용 파일
 
-인스타그램 감성의 개인 다이어리 앱. React (Vite) + Tailwind CSS + Firebase.
+`fromicn/lifelog` 저장소에 그대로 덮어써서 커밋하면 되는 두 파일입니다.
 
-## 주요 기능
-- 피드 / 3열 그리드 / 달력 / 스크랩 뷰
-- 일기 CRUD, 사진 최대 5장 캐러셀, 해시태그·감정 태그 필터
-- Firebase Auth Google 로그인 — 어느 기기에서나 같은 데이터
-- Cloud Firestore 실시간 동기화(`users/{uid}/logs/{logId}`) + 오프라인 지원
-- 사진: 클라이언트 압축(긴 변 1600px, WebP) 후 Firebase Storage 저장
-- 기존 Drive 백업 JSON 일회성 마이그레이션 (설정 → 데이터)
-- Capacitor 안드로이드 APK 패키징 지원
+## 반영 방법
+1. `index.html` → 저장소 루트의 `index.html`을 이 파일로 교체 (Newsreader 폰트 링크 추가됨)
+2. `src/App.jsx` → 저장소의 `src/App.jsx`를 이 파일로 교체
+3. 그 외 파일(`firebase.js`, `db.js`, `photos.js`, `migrate.js` 등)은 변경 없음 — 그대로 두면 됩니다.
+4. `git add -A && git commit -m "디자인: 에디토리얼 크림 톤 적용" && git push` → main에 푸시하면 GitHub Actions가 자동 배포합니다.
 
-## 설정
-**`FIREBASE_SETUP.md`** 체크리스트를 따라 Firebase 콘솔 설정 후,
-`src/firebase-config.js`에 웹 앱 설정을 붙여넣으세요.
+## 무엇이 바뀌었나
+- **팔레트**: 흰 배경 + 하늘색(sky-500) 악센트 → 크림 배경(`#f2ecdf`/다크 `#1c1a16`) + 딥올리브 악센트(emerald-700/800)
+- **워드마크**: cursive 필기체 → `Newsreader` 이탤릭 세리프 (index.html에 Google Fonts 링크 추가)
+- **그라디언트 카드**: 무지개톤 8종 → 올리브·크림 듀오톤 6종
+- **아바타 링 · 작성(+) 버튼 · 선택된 기분칩**: 3색 레인보우 그라디언트 → 앰버→올리브 2색 그라디언트
+- **해시태그·버튼·포인트 컬러**: sky-500/600 전체를 emerald-700/800으로 치환
+- 레이아웃, 인터랙션, Firebase 연동 로직은 기존과 동일 — 색상·타이포그래피만 교체했습니다.
 
-## 실행
-```bash
-npm install
-npm run dev        # 웹 개발 서버
-npm run build      # GitHub Pages용 빌드 (base: /lifelog/)
-npm run build:app  # APK용 빌드 (상대경로) + cap sync
-```
-
-## 배포
-`main` 브랜치에 push하면 GitHub Actions가 자동으로 GitHub Pages에 배포합니다.
-
-## 구조
-```
-src/
-  App.jsx             UI (단일 파일)
-  firebase.js         초기화 + Google 로그인 (웹/네이티브 분기)
-  firebase-config.js  Firebase 콘솔 설정 붙여넣는 곳
-  db.js               Firestore CRUD + onSnapshot 구독
-  photos.js           사진 압축·업로드·URL 캐시
-  migrate.js          Drive 백업 JSON → Firestore 마이그레이션
-firestore.rules       Firestore 보안 규칙 (본인만 접근)
-storage.rules         Storage 보안 규칙 (본인만 접근)
-capacitor.config.json Capacitor 설정 (com.fromicn.lifelog)
-```
+## 참고
+색상은 Tailwind 임의값(`bg-[#f2ecdf]` 등)으로 넣었기 때문에 `tailwind.config.js` 수정 없이 그대로 동작합니다.

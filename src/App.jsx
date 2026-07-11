@@ -12,7 +12,7 @@ import { getPhotoURL } from "./photos";
 import { importLegacyJSON } from "./migrate";
 
 /* ================================================================
-   LifeLog — 인스타그램 감성의 개인 다이어리 앱
+   LifeLog — "에디토리얼 크림" 리디자인
    React + Tailwind CSS + lucide-react
 
    저장소: Cloud Firestore (users/{uid}/logs/{logId})
@@ -20,6 +20,12 @@ import { importLegacyJSON } from "./migrate";
    - 사진: 압축(1600px/WebP) 후 Firebase Storage 업로드,
      문서에는 Storage 경로만 저장
    - 인증: Firebase Auth Google 로그인 (웹 팝업 / APK 네이티브 분기)
+
+   변경점 (디자인):
+   - 팔레트: 크림 배경 + 딥올리브 악센트 (기존 sky-500 → emerald-700/800)
+   - 워드마크: cursive → 'Newsreader' 이탤릭 세리프 (index.html에 폰트 링크 추가 필요)
+   - 그라디언트 카드: 무지개톤 → 올리브/크림 듀오톤
+   - 아바타 링 · FAB · 선택된 기분칩: 3색 레인보우 → 2색 앰버→올리브
    ================================================================ */
 
 /* ---------- 상수 ---------- */
@@ -33,14 +39,12 @@ const MOODS = [
 ];
 
 const GRADIENTS = [
-  "bg-gradient-to-br from-rose-300 via-fuchsia-300 to-indigo-400",
-  "bg-gradient-to-br from-amber-200 via-orange-300 to-rose-400",
-  "bg-gradient-to-br from-sky-300 via-cyan-300 to-emerald-300",
-  "bg-gradient-to-br from-violet-300 via-purple-400 to-fuchsia-500",
-  "bg-gradient-to-br from-lime-200 via-emerald-300 to-teal-400",
-  "bg-gradient-to-br from-slate-300 via-slate-400 to-slate-600",
-  "bg-gradient-to-br from-pink-200 via-rose-300 to-red-300",
-  "bg-gradient-to-br from-indigo-300 via-blue-400 to-cyan-400",
+  "bg-gradient-to-br from-emerald-800 via-emerald-600 to-amber-100",
+  "bg-gradient-to-br from-stone-700 via-amber-600 to-amber-100",
+  "bg-gradient-to-br from-teal-700 via-stone-400 to-amber-50",
+  "bg-gradient-to-br from-lime-800 via-lime-700 to-stone-200",
+  "bg-gradient-to-br from-amber-800 via-amber-500 to-stone-100",
+  "bg-gradient-to-br from-neutral-700 via-neutral-400 to-stone-100",
 ];
 
 const todayStr = () => new Date().toISOString().slice(0, 10);
@@ -185,7 +189,7 @@ function RichText({ text }) {
         part.startsWith("#") ? (
           <button key={i}
             onClick={() => { setFilter((f) => ({ ...f, tag: part.slice(1) })); setView("feed"); }}
-            className="text-sky-500 hover:underline font-medium">{part}</button>
+            className="text-emerald-700 hover:underline font-medium">{part}</button>
         ) : (
           <span key={i}>{part}</span>
         )
@@ -205,7 +209,7 @@ function DiaryCard({ entry }) {
     <article className={`${T.card} sm:border ${T.border} sm:rounded-xl overflow-hidden`}>
       {/* 헤더 */}
       <div className="flex items-center gap-3 px-4 py-3">
-        <div className="w-9 h-9 rounded-full p-[2px] bg-gradient-to-tr from-amber-400 via-rose-500 to-fuchsia-600">
+        <div className="w-9 h-9 rounded-full p-[2px] bg-gradient-to-tr from-amber-700 to-emerald-800">
           <div className={`w-full h-full rounded-full ${T.card} flex items-center justify-center text-base`}>
             {mood?.emoji || "📔"}
           </div>
@@ -248,7 +252,7 @@ function DiaryCard({ entry }) {
       {/* 액션 바: 스크랩 */}
       <div className="flex items-center px-4 pt-3">
         <button onClick={() => toggleScrap(entry.id)} className="ml-auto hover:opacity-60 transition-opacity">
-          <Bookmark size={24} className={entry.scrapped ? "fill-amber-400 text-amber-400" : T.icon} strokeWidth={1.7} />
+          <Bookmark size={24} className={entry.scrapped ? "fill-amber-600 text-amber-600" : T.icon} strokeWidth={1.7} />
         </button>
       </div>
 
@@ -278,7 +282,7 @@ function FilterBar() {
       <div className="flex gap-2 overflow-x-auto pb-1" style={{ scrollbarWidth: "none" }}>
         {filter.tag && (
           <button onClick={() => setFilter((f) => ({ ...f, tag: null }))}
-            className="flex-shrink-0 flex items-center gap-1 px-3 py-1.5 rounded-full bg-sky-500 text-white text-xs font-medium">
+            className="flex-shrink-0 flex items-center gap-1 px-3 py-1.5 rounded-full bg-emerald-700 text-white text-xs font-medium">
             <Hash size={12} />{filter.tag}<X size={12} />
           </button>
         )}
@@ -394,7 +398,7 @@ function CalendarView({ entries, onOpen }) {
               onClick={() => list && onOpen(list[0])}
               className={`aspect-square rounded-lg flex flex-col items-center justify-center gap-0.5 relative overflow-hidden border ${
                 list ? `${T.border} hover:opacity-80` : "border-transparent"
-              } ${isToday ? "ring-2 ring-sky-400" : ""}`}>
+              } ${isToday ? "ring-2 ring-emerald-700" : ""}`}>
               {list ? (
                 <>
                   <div className="absolute inset-0 opacity-90"><Img img={list[0].images[0]} /></div>
@@ -482,7 +486,7 @@ function WritePage({ initial, onClose }) {
           <span className={`font-semibold text-sm ${T.text}`}>{editing ? "일기 수정" : "새 일기"}</span>
           <button onClick={save}
             disabled={(!text.trim() && images.length === 0) || saving}
-            className="flex items-center gap-1 text-sky-500 font-semibold text-sm disabled:opacity-40">
+            className="flex items-center gap-1 text-emerald-700 font-semibold text-sm disabled:opacity-40">
             {saving && <Loader2 size={14} className="animate-spin" />}
             {saving ? "저장 중" : "저장"}
           </button>
@@ -532,7 +536,7 @@ function WritePage({ initial, onClose }) {
           {tags.length > 0 && (
             <div className="flex flex-wrap gap-1.5 -mt-2">
               {tags.map((t) => (
-                <span key={t} className="text-xs px-2 py-0.5 rounded-full bg-sky-500/10 text-sky-500 font-medium">#{t}</span>
+                <span key={t} className="text-xs px-2 py-0.5 rounded-full bg-emerald-700/10 text-emerald-700 font-medium">#{t}</span>
               ))}
             </div>
           )}
@@ -556,7 +560,7 @@ function WritePage({ initial, onClose }) {
                   title="현재 위치 자동 입력"
                   className="flex-shrink-0 disabled:opacity-50">
                   <LocateFixed size={15}
-                    className={locating ? "text-sky-500 animate-pulse" : `${T.sub} hover:text-sky-500`} />
+                    className={locating ? "text-emerald-700 animate-pulse" : `${T.sub} hover:text-emerald-700`} />
                 </button>
               </div>
             </label>
@@ -571,7 +575,7 @@ function WritePage({ initial, onClose }) {
                 <button key={m.id} onClick={() => setMood(mood === m.id ? null : m.id)}
                   className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-all ${
                     mood === m.id
-                      ? "bg-gradient-to-r from-rose-500 to-fuchsia-500 text-white border-transparent scale-105"
+                      ? "bg-gradient-to-r from-amber-700 to-emerald-800 text-white border-transparent scale-105"
                       : `${T.card} ${T.text} ${T.border} hover:opacity-70`
                   }`}>
                   {m.emoji} {m.label}
@@ -594,7 +598,7 @@ function ScrapView({ entries }) {
   return (
     <div className="space-y-4 sm:space-y-6">
       <div className={`px-4 sm:px-0 flex items-center gap-1.5 text-sm font-semibold ${T.text}`}>
-        <Bookmark size={16} className="fill-amber-400 text-amber-400" /> 스크랩 ({scrapped.length})
+        <Bookmark size={16} className="fill-amber-600 text-amber-600" /> 스크랩 ({scrapped.length})
       </div>
       {scrapped.length === 0 ? (
         <div className={`text-center py-20 ${T.sub} text-sm`}>
@@ -705,7 +709,7 @@ function SettingsModal({ onClose }) {
                 </div>
               </div>
               <button onClick={() => importRef.current?.click()} disabled={importing}
-                className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-sky-500 text-white text-sm font-medium hover:bg-sky-600 disabled:opacity-40">
+                className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-emerald-700 text-white text-sm font-medium hover:bg-emerald-800 disabled:opacity-40">
                 {importing ? <Loader2 size={15} className="animate-spin" /> : <UploadCloud size={15} />}
                 {importing
                   ? importProgress
@@ -716,7 +720,7 @@ function SettingsModal({ onClose }) {
               <input ref={importRef} type="file" accept="application/json,.json" className="hidden"
                 onChange={(e) => { handleImport(e.target.files[0]); e.target.value = ""; }} />
               {importResult && (
-                <div className={`text-xs flex items-center gap-1 ${importResult.startsWith("✅") ? "text-emerald-500" : "text-red-500"}`}>
+                <div className={`text-xs flex items-center gap-1 ${importResult.startsWith("✅") ? "text-emerald-600" : "text-red-500"}`}>
                   {importResult.startsWith("✅") && <Check size={13} />}
                   {importResult}
                 </div>
@@ -731,7 +735,7 @@ function SettingsModal({ onClose }) {
                 <button key={label} onClick={() => setDark(v)}
                   className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-lg text-sm font-medium border transition-colors ${
                     dark === v
-                      ? "bg-gradient-to-r from-rose-500 to-fuchsia-500 text-white border-transparent"
+                      ? "bg-gradient-to-r from-amber-700 to-emerald-800 text-white border-transparent"
                       : `${T.card} ${T.text} ${T.border} hover:opacity-70`
                   }`}>
                   <Icon size={15} /> {label}
@@ -760,7 +764,7 @@ function BottomNav({ onWrite }) {
         <Item id="feed" icon={Home} />
         <Item id="calendar" icon={CalendarIcon} />
         <button onClick={onWrite} className="flex-1 flex items-center justify-center py-2">
-          <span className="w-11 h-11 rounded-xl bg-gradient-to-tr from-amber-400 via-rose-500 to-fuchsia-600 flex items-center justify-center shadow-lg hover:scale-105 transition-transform">
+          <span className="w-11 h-11 rounded-xl bg-gradient-to-tr from-amber-700 to-emerald-800 flex items-center justify-center shadow-lg hover:scale-105 transition-transform">
             <Plus size={24} className="text-white" />
           </span>
         </button>
@@ -790,7 +794,7 @@ function LoginScreen({ T }) {
   };
   return (
     <div className={`min-h-screen ${T.bg} flex flex-col items-center justify-center px-8`}>
-      <h1 className={`text-4xl font-bold mb-2 ${T.text}`} style={{ fontFamily: "'Segoe Script','cursive'" }}>
+      <h1 className={`text-4xl mb-2 ${T.text}`} style={{ fontFamily: "'Newsreader', Georgia, serif", fontStyle: "italic", fontWeight: 500 }}>
         LifeLog
       </h1>
       <p className={`text-sm mb-10 ${T.sub}`}>나만의 일기장 · 어느 기기에서나 같은 기록</p>
@@ -858,10 +862,10 @@ export default function LifeLogApp() {
     setViewer((v) => (v ? entries.find((e) => e.id === v.id) || null : v));
   }, [entries]);
 
-  /* 테마 토큰 (라이트/다크) */
+  /* 테마 토큰 — "에디토리얼 크림" 팔레트 (라이트/다크) */
   const T = dark
-    ? { bg: "bg-black", card: "bg-neutral-900", text: "text-neutral-100", sub: "text-neutral-400", subRaw: "text-neutral-500", border: "border-neutral-800", input: "bg-neutral-800", icon: "text-neutral-100" }
-    : { bg: "bg-neutral-50", card: "bg-white", text: "text-neutral-900", sub: "text-neutral-500", subRaw: "text-neutral-400", border: "border-neutral-200", input: "bg-neutral-100", icon: "text-neutral-900" };
+    ? { bg: "bg-[#1c1a16]", card: "bg-[#26231d]", text: "text-[#ece6da]", sub: "text-[#a49b8a]", subRaw: "text-[#877e6f]", border: "border-[#3a352c]", input: "bg-[#2f2b24]", icon: "text-[#ece6da]" }
+    : { bg: "bg-[#f2ecdf]", card: "bg-[#faf7f0]", text: "text-[#2b2620]", sub: "text-[#6b6255]", subRaw: "text-[#948a79]", border: "border-[#ddd4c1]", input: "bg-[#e8e0d0]", icon: "text-[#2b2620]" };
 
   if (!CONFIG_READY) return <SetupNotice T={T} />;
   if (user === undefined)
@@ -910,7 +914,7 @@ export default function LifeLogApp() {
         {/* 상단 헤더 */}
         <header className={`sticky top-0 z-30 ${T.card} border-b ${T.border}`}>
           <div className="max-w-md mx-auto flex items-center justify-between px-4 py-3">
-            <h1 className={`text-xl font-bold tracking-tight ${T.text}`} style={{ fontFamily: "'Segoe Script','cursive'" }}>
+            <h1 className={`text-xl tracking-tight ${T.text}`} style={{ fontFamily: "'Newsreader', Georgia, serif", fontStyle: "italic", fontWeight: 500 }}>
               LifeLog
             </h1>
             <button onClick={() => setSettingsOpen(true)} className={`p-2 rounded-full hover:bg-neutral-500/10 ${T.icon}`}>
