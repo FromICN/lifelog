@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useRef, useEffect, createContext, useContext } from "react";
 import {
   Home, LayoutGrid, Calendar as CalendarIcon, Plus, Moon, Sun, X, Search,
-  ChevronLeft, ChevronRight, MapPin, Trash2, Pencil,
+  ChevronLeft, ChevronRight, MapPin, LocateFixed, Trash2, Pencil,
   Bookmark, MoreHorizontal, Image as ImageIcon, Layers, Palette, Hash,
   Settings, UploadCloud, LogOut, RotateCcw, Check,
 } from "lucide-react";
@@ -83,6 +83,44 @@ const fmtDate = (d) => {
   const [y, m, day] = d.split("-");
   return `${y}년 ${+m}월 ${+day}일`;
 };
+
+/* ---------- GPS 현재 위치 → 장소명 (Nominatim 역지오코딩, API 키 불필요) ---------- */
+const getCurrentPlace = () =>
+  new Promise((resolve, reject) => {
+    if (!navigator.geolocation)
+      return reject(new Error("이 기기는 위치 기능을 지원하지 않아요"));
+    navigator.geolocation.getCurrentPosition(
+      async ({ coords: { latitude: lat, longitude: lon } }) => {
+        try {
+          const r = await fetch(
+            `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&accept-language=ko&zoom=16`,
+            { headers: { Accept: "application/json" } }
+          );
+          const d = await r.json();
+          const a = d.address || {};
+          const name = [
+            a.city || a.town || a.village || a.county || "",
+            a.borough || a.city_district || a.district || "",
+            a.suburb || a.neighbourhood || a.quarter || a.road || "",
+          ].filter(Boolean).join(" ").trim();
+          resolve(
+            name ||
+            (d.display_name ? d.display_name.split(",").slice(0, 2).map((s) => s.trim()).reverse().join(" ") : "") ||
+            `${lat.toFixed(4)}, ${lon.toFixed(4)}`
+          );
+        } catch {
+          resolve(`${lat.toFixed(4)}, ${lon.toFixed(4)}`); // 지오코딩 실패 시 좌표로 대체
+        }
+      },
+      (err) =>
+        reject(new Error(
+          err.code === 1
+            ? "위치 권한이 거부되었어요. 브라우저 설정에서 허용해주세요"
+            : "현재 위치를 가져오지 못했어요. 잠시 후 다시 시도해주세요"
+        )),
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
+    );
+  });
 
 /* ---------- Context (전역 상태) ---------- */
 const DiaryContext = createContext(null);
@@ -398,8 +436,23 @@ function WritePage({ initial, onClose }) {
   const [location, setLocation] = useState(initial?.location || "");
   const [mood, setMood] = useState(initial?.mood || null);
   const [images, setImages] = useState(initial?.images || []);
+  const [locating, setLocating] = useState(false);
+  const [locError, setLocError] = useState(null);
   const fileRef = useRef(null);
   const tags = extractTags(text);
+
+  /* GPS로 현재 위치 자동 입력 */
+  const fillCurrentLocation = async () => {
+    setLocError(null);
+    setLocating(true);
+    try {
+      setLocation(await getCurrentPlace());
+    } catch (e) {
+      setLocError(e.message);
+    } finally {
+      setLocating(false);
+    }
+  };
 
   const addPhotos = (files) => {
     [...files].slice(0, 5 - images.length).forEach((f) => {
@@ -499,9 +552,16 @@ function WritePage({ initial, onClose }) {
                 <input value={location} onChange={(e) => setLocation(e.target.value)}
                   placeholder="장소 추가"
                   className={`flex-1 min-w-0 bg-transparent text-sm outline-none ${T.text}`} />
+                <button type="button" onClick={fillCurrentLocation} disabled={locating}
+                  title="현재 위치 자동 입력"
+                  className="flex-shrink-0 disabled:opacity-50">
+                  <LocateFixed size={15}
+                    className={locating ? "text-sky-500 animate-pulse" : `${T.sub} hover:text-sky-500`} />
+                </button>
               </div>
             </label>
           </div>
+          {locError && <p className="text-xs text-red-500 -mt-2">{locError}</p>}
 
           {/* 오늘의 기분 */}
           <div>
