@@ -3,21 +3,23 @@ import {
   Home, LayoutGrid, Calendar as CalendarIcon, Plus, Moon, Sun, X, Search,
   ChevronLeft, ChevronRight, MapPin, LocateFixed, Trash2, Pencil,
   Bookmark, MoreHorizontal, Image as ImageIcon, Layers, Palette, Hash,
-  Settings, UploadCloud, LogOut, RotateCcw, Check,
+  Settings, UploadCloud, LogOut, Loader2, Check,
 } from "lucide-react";
+import { auth, CONFIG_READY, signInWithGoogle, logOut } from "./firebase";
+import { onAuthStateChanged } from "firebase/auth";
+import { subscribeLogs, createLog, updateLog, deleteLog, setScrap } from "./db";
+import { getPhotoURL } from "./photos";
+import { importLegacyJSON } from "./migrate";
 
 /* ================================================================
    LifeLog — 인스타그램 감성의 개인 다이어리 앱
-   React + Tailwind CSS + lucide-react / 단일 파일 구현
+   React + Tailwind CSS + lucide-react
 
-   NOTE(저장소): claude.ai 미리보기 환경은 localStorage를 지원하지
-   않아 메모리(useState) + Mock Data로 동작합니다. 로컬 실행 시 아래
-   주석의 useEffect 2줄만 추가하면 localStorage 영속화가 됩니다.
-
-   // useEffect(() => { const s = localStorage.getItem("diary");
-   //   if (s) setEntries(JSON.parse(s)); }, []);
-   // useEffect(() => { localStorage.setItem("diary",
-   //   JSON.stringify(entries)); }, [entries]);
+   저장소: Cloud Firestore (users/{uid}/logs/{logId})
+   - onSnapshot 실시간 동기화 + 오프라인 persistence
+   - 사진: 압축(1600px/WebP) 후 Firebase Storage 업로드,
+     문서에는 Storage 경로만 저장
+   - 인증: Firebase Auth Google 로그인 (웹 팝업 / APK 네이티브 분기)
    ================================================================ */
 
 /* ---------- 상수 ---------- */
@@ -42,39 +44,6 @@ const GRADIENTS = [
 ];
 
 const todayStr = () => new Date().toISOString().slice(0, 10);
-
-const MOCK_ENTRIES = [
-  {
-    id: 1, date: "2026-07-10", mood: "happy", location: "성수동 카페거리",
-    text: "오랜만에 친구들이랑 성수 카페투어! 새로 생긴 베이커리가 대박이었다 🥐 #카페투어 #성수동 #주말일상",
-    images: [{ type: "gradient", value: GRADIENTS[1], label: "☕" }, { type: "gradient", value: GRADIENTS[0], label: "🥐" }, { type: "gradient", value: GRADIENTS[4], label: "🌿" }],
-  },
-  {
-    id: 2, date: "2026-07-08", mood: "calm", location: "한강공원", scrapped: true,
-    text: "퇴근하고 한강에서 러닝 5km. 노을이 미쳤다. 이런 날은 기록해둬야 해. #러닝 #한강 #운동일기",
-    images: [{ type: "gradient", value: GRADIENTS[3], label: "🌇" }],
-  },
-  {
-    id: 3, date: "2026-07-05", mood: "excited", location: "제주 함덕해수욕장",
-    text: "제주 여행 첫날! 바다색이 진짜 에메랄드빛이다 🌊 내일은 오름 가야지. #제주여행 #함덕 #여름휴가",
-    images: [{ type: "gradient", value: GRADIENTS[2], label: "🌊" }, { type: "gradient", value: GRADIENTS[7], label: "🏝️" }],
-  },
-  {
-    id: 4, date: "2026-06-28", mood: "cloudy", location: "집",
-    text: "하루종일 비. 집에서 책 읽고 뜨개질하면서 보낸 조용한 일요일. #집콕 #독서기록",
-    images: [{ type: "gradient", value: GRADIENTS[5], label: "🌧️" }],
-  },
-  {
-    id: 5, date: "2026-06-21", mood: "sunny", location: "북한산", scrapped: true,
-    text: "북한산 등산 완등! 날씨가 도와줬다 ☀️ 정상에서 먹는 김밥은 진리. #등산 #북한산 #주말일상",
-    images: [{ type: "gradient", value: GRADIENTS[4], label: "⛰️" }, { type: "gradient", value: GRADIENTS[1], label: "🍙" }],
-  },
-  {
-    id: 6, date: "2026-06-15", mood: "tired", location: "회사",
-    text: "프로젝트 마감 주간... 야근 3일차. 그래도 끝이 보인다. 주말엔 무조건 쉰다. #직장인일기 #마감",
-    images: [{ type: "gradient", value: GRADIENTS[6], label: "💻" }],
-  },
-];
 
 /* ---------- 유틸 ---------- */
 const extractTags = (text) => (text.match(/#[^\s#]+/g) || []).map((t) => t.slice(1));
@@ -126,10 +95,29 @@ const getCurrentPlace = () =>
 const DiaryContext = createContext(null);
 const useDiary = () => useContext(DiaryContext);
 
+/* ---------- Storage 사진 (경로 → URL 비동기 로드) ---------- */
+function StoragePhoto({ img, className = "" }) {
+  const [url, setUrl] = useState(img.preview || img.value || null);
+  useEffect(() => {
+    if (img.preview || img.value || !img.path) return;
+    let on = true;
+    getPhotoURL(img.path)
+      .then((u) => on && setUrl(u))
+      .catch(() => on && setUrl(null));
+    return () => { on = false; };
+  }, [img.path, img.preview, img.value]);
+  if (!url)
+    return (
+      <div className={`w-full h-full flex items-center justify-center bg-neutral-500/10 ${className}`}>
+        <ImageIcon size={24} className="opacity-30" />
+      </div>
+    );
+  return <img src={url} alt="diary" className={`object-cover w-full h-full ${className}`} />;
+}
+
 /* ---------- 공용: 이미지(사진 or 그라디언트) ---------- */
 function Img({ img, className = "" }) {
-  if (img.type === "photo")
-    return <img src={img.value} alt="diary" className={`object-cover w-full h-full ${className}`} />;
+  if (img.type === "photo") return <StoragePhoto img={img} className={className} />;
   return (
     <div className={`w-full h-full flex items-center justify-center ${img.value} ${className}`}>
       <span className="text-5xl drop-shadow">{img.label || "📷"}</span>
@@ -208,7 +196,7 @@ function RichText({ text }) {
 
 /* ---------- 피드 카드 ---------- */
 function DiaryCard({ entry }) {
-  const { T, deleteEntry, openEdit, toggleScrap } = useDiary();
+  const { T, uname, deleteEntry, openEdit, toggleScrap } = useDiary();
   const [menu, setMenu] = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
   const mood = moodOf(entry.mood);
@@ -224,7 +212,7 @@ function DiaryCard({ entry }) {
         </div>
         <div className="flex-1 min-w-0">
           <div className={`text-sm font-semibold ${T.text}`}>
-            mia.diary
+            {uname}
             {mood && (
               <span className={`ml-2 text-xs font-normal ${T.sub}`}>{mood.emoji} {mood.label}</span>
             )}
@@ -436,6 +424,7 @@ function WritePage({ initial, onClose }) {
   const [location, setLocation] = useState(initial?.location || "");
   const [mood, setMood] = useState(initial?.mood || null);
   const [images, setImages] = useState(initial?.images || []);
+  const [saving, setSaving] = useState(false);
   const [locating, setLocating] = useState(false);
   const [locError, setLocError] = useState(null);
   const fileRef = useRef(null);
@@ -454,11 +443,12 @@ function WritePage({ initial, onClose }) {
     }
   };
 
+  /* 새 사진: 미리보기(dataURL) + 원본 File 보관 → 저장 시 압축·업로드 */
   const addPhotos = (files) => {
     [...files].slice(0, 5 - images.length).forEach((f) => {
       const r = new FileReader();
       r.onload = (ev) => setImages((imgs) =>
-        imgs.length < 5 ? [...imgs, { type: "photo", value: ev.target.result }] : imgs);
+        imgs.length < 5 ? [...imgs, { type: "photo", preview: ev.target.result, file: f }] : imgs);
       r.readAsDataURL(f);
     });
   };
@@ -467,11 +457,20 @@ function WritePage({ initial, onClose }) {
     const g = GRADIENTS[Math.floor(Math.random() * GRADIENTS.length)];
     setImages((imgs) => [...imgs, { type: "gradient", value: g, label: "📷" }]);
   };
-  const save = () => {
-    if (!text.trim() && images.length === 0) return;
-    const data = { date, text: text.trim(), location: location.trim(), mood, images };
-    editing ? updateEntry({ ...initial, ...data }) : addEntry(data);
-    onClose();
+  const save = async () => {
+    if ((!text.trim() && images.length === 0) || saving) return;
+    setSaving(true);
+    try {
+      const data = { date, text: text.trim(), location: location.trim(), mood, images };
+      if (editing) await updateEntry({ ...initial, ...data });
+      else await addEntry(data);
+      onClose();
+    } catch (e) {
+      console.error("저장 실패:", e);
+      alert(`저장에 실패했어요: ${e.message}`);
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -479,12 +478,13 @@ function WritePage({ initial, onClose }) {
       {/* 페이지 헤더 */}
       <div className={`sticky top-0 z-10 ${T.card} border-b ${T.border}`}>
         <div className="max-w-md mx-auto flex items-center justify-between px-4 py-3">
-          <button onClick={onClose} className={T.sub}><X size={22} /></button>
+          <button onClick={onClose} disabled={saving} className={T.sub}><X size={22} /></button>
           <span className={`font-semibold text-sm ${T.text}`}>{editing ? "일기 수정" : "새 일기"}</span>
           <button onClick={save}
-            disabled={!text.trim() && images.length === 0}
-            className="text-sky-500 font-semibold text-sm disabled:opacity-40">
-            저장
+            disabled={(!text.trim() && images.length === 0) || saving}
+            className="flex items-center gap-1 text-sky-500 font-semibold text-sm disabled:opacity-40">
+            {saving && <Loader2 size={14} className="animate-spin" />}
+            {saving ? "저장 중" : "저장"}
           </button>
         </div>
       </div>
@@ -621,73 +621,13 @@ function ViewerModal({ entry, onClose }) {
   );
 }
 
-/* ================================================================
-   Google Drive 백업 모듈
-   - 실제 연동: Google Cloud Console에서 OAuth Client ID를 발급받아
-     GOOGLE_CLIENT_ID에 입력 (scope: drive.file).
-   - 미입력 시 데모 모드: 로그인/백업/복원을 메모리로 시뮬레이션.
-   - 정책: 일자별 1개 파일(같은 날 재백업 시 덮어씀), 최대 7일치
-     보관, 초과분은 오래된 순으로 자동 삭제.
-   ================================================================ */
-const GOOGLE_CLIENT_ID = "YOUR_CLIENT_ID.apps.googleusercontent.com";
-const DEMO_MODE = GOOGLE_CLIENT_ID.startsWith("YOUR_");
-const BACKUP_PREFIX = "lifelog-backup-";
-const MAX_BACKUP_DAYS = 7;
-const backupName = (d) => `${BACKUP_PREFIX}${d}.json`;
-
-const loadGis = () =>
-  new Promise((res, rej) => {
-    if (window.google?.accounts) return res();
-    const s = document.createElement("script");
-    s.src = "https://accounts.google.com/gsi/client";
-    s.onload = res;
-    s.onerror = rej;
-    document.head.appendChild(s);
-  });
-
-const gFetch = (token, url, opt = {}) =>
-  fetch(url, { ...opt, headers: { Authorization: `Bearer ${token}`, ...(opt.headers || {}) } });
-
-const driveList = async (token) => {
-  const q = encodeURIComponent(`name contains '${BACKUP_PREFIX}' and trashed=false`);
-  const r = await gFetch(token,
-    `https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=name desc&fields=files(id,name,modifiedTime)`);
-  return (await r.json()).files || [];
-};
-
-const driveUpload = async (token, name, content, existingId) => {
-  const b = "-------instadiary-boundary";
-  const body =
-    `--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n` +
-    `${JSON.stringify({ name, mimeType: "application/json" })}\r\n` +
-    `--${b}\r\nContent-Type: application/json\r\n\r\n${content}\r\n--${b}--`;
-  await gFetch(token,
-    `https://www.googleapis.com/upload/drive/v3/files${existingId ? `/${existingId}` : ""}?uploadType=multipart`,
-    { method: existingId ? "PATCH" : "POST", headers: { "Content-Type": `multipart/related; boundary=${b}` }, body });
-};
-
-const driveDelete = (token, id) =>
-  gFetch(token, `https://www.googleapis.com/drive/v3/files/${id}`, { method: "DELETE" });
-
-const driveDownload = async (token, id) =>
-  (await gFetch(token, `https://www.googleapis.com/drive/v3/files/${id}?alt=media`)).json();
-
-/* ---------- 토글 스위치 ---------- */
-function Toggle({ checked, onChange, disabled }) {
-  return (
-    <button disabled={disabled} onClick={() => onChange(!checked)}
-      className={`relative w-11 h-6 rounded-full transition-colors flex-shrink-0 ${
-        checked ? "bg-sky-500" : "bg-neutral-400/40"} disabled:opacity-40`}>
-      <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all ${
-        checked ? "left-[22px]" : "left-0.5"}`} />
-    </button>
-  );
-}
-
 /* ---------- 설정 모달 ---------- */
-function SettingsModal({ onClose, google, onConnect, onDisconnect, backups, lastBackup, autoBackup, setAutoBackup, onBackup, onRestore, busy }) {
-  const { T, dark, setDark } = useDiary();
-  const [restoredId, setRestoredId] = useState(null);
+function SettingsModal({ onClose }) {
+  const { T, dark, setDark, user } = useDiary();
+  const importRef = useRef(null);
+  const [importing, setImporting] = useState(false);
+  const [importProgress, setImportProgress] = useState(null); // {done, total}
+  const [importResult, setImportResult] = useState(null);
 
   const Section = ({ title, children }) => (
     <div className={`border-b ${T.border} pb-5 mb-5 last:border-0 last:pb-0 last:mb-0`}>
@@ -695,6 +635,32 @@ function SettingsModal({ onClose, google, onConnect, onDisconnect, backups, last
       {children}
     </div>
   );
+
+  /* 기존 Drive 백업 JSON → Firestore 일회성 마이그레이션 */
+  const handleImport = async (file) => {
+    if (!file || importing) return;
+    setImporting(true);
+    setImportResult(null);
+    setImportProgress(null);
+    try {
+      const json = JSON.parse(await file.text());
+      const total = Array.isArray(json) ? json.length : 0;
+      if (total && !window.confirm(
+        `${total}건의 일기를 가져옵니다. 같은 파일을 두 번 가져오면 중복 생성돼요. 계속할까요?`)) {
+        setImporting(false);
+        return;
+      }
+      const n = await importLegacyJSON(user.uid, json, (done, t) =>
+        setImportProgress({ done, total: t }));
+      setImportResult(`✅ ${n}건 가져오기 완료`);
+    } catch (e) {
+      console.error("가져오기 실패:", e);
+      setImportResult(`가져오기 실패: ${e.message}`);
+    } finally {
+      setImporting(false);
+      setImportProgress(null);
+    }
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60" onClick={onClose}>
@@ -707,67 +673,53 @@ function SettingsModal({ onClose, google, onConnect, onDisconnect, backups, last
         </div>
 
         <div className="overflow-y-auto p-4">
-          {/* 구글 연동 */}
-          <Section title="GOOGLE 계정">
-            {google.connected ? (
-              <div className="flex items-center gap-3">
+          {/* 계정 */}
+          <Section title="계정">
+            <div className="flex items-center gap-3">
+              {user.photoURL ? (
+                <img src={user.photoURL} alt="" referrerPolicy="no-referrer"
+                  className="w-9 h-9 rounded-full" />
+              ) : (
                 <div className="w-9 h-9 rounded-full bg-white border border-neutral-200 flex items-center justify-center font-bold text-sm">
                   <span className="bg-gradient-to-r from-blue-500 via-red-500 to-amber-500 bg-clip-text text-transparent">G</span>
                 </div>
-                <div className="flex-1 min-w-0">
-                  <div className={`text-sm font-medium truncate ${T.text}`}>{google.email}</div>
-                  <div className={`text-xs ${T.sub}`}>
-                    {DEMO_MODE ? "데모 모드 · Drive 연동됨(시뮬레이션)" : "Google Drive 연동됨"}
-                  </div>
-                </div>
-                <button onClick={onDisconnect}
-                  className="flex items-center gap-1 text-xs text-red-500 hover:opacity-70">
-                  <LogOut size={13} /> 해제
-                </button>
+              )}
+              <div className="flex-1 min-w-0">
+                <div className={`text-sm font-medium truncate ${T.text}`}>{user.email}</div>
+                <div className={`text-xs ${T.sub}`}>실시간 동기화 중 · Cloud Firestore</div>
               </div>
-            ) : (
-              <button onClick={onConnect}
-                className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-lg border ${T.border} text-sm font-medium ${T.text} hover:opacity-70`}>
-                <span className="font-bold bg-gradient-to-r from-blue-500 via-red-500 to-amber-500 bg-clip-text text-transparent">G</span>
-                Google 계정 연결
+              <button onClick={() => logOut().catch(console.error)}
+                className="flex items-center gap-1 text-xs text-red-500 hover:opacity-70">
+                <LogOut size={13} /> 로그아웃
               </button>
-            )}
+            </div>
           </Section>
 
-          {/* 백업 */}
-          <Section title="백업">
+          {/* 데이터 */}
+          <Section title="데이터">
             <div className="space-y-3">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className={`text-sm ${T.text}`}>자동 백업</div>
-                  <div className={`text-xs ${T.sub}`}>하루 1회 · 일자별 파일 · 최대 {MAX_BACKUP_DAYS}일 보관 후 자동 삭제</div>
+              <div>
+                <div className={`text-sm ${T.text}`}>기존 백업 가져오기</div>
+                <div className={`text-xs ${T.sub}`}>
+                  이전 Drive 백업 파일(lifelog-backup-*.json)을 Firestore로 옮깁니다. 1회만 실행하세요.
                 </div>
-                <Toggle checked={autoBackup} onChange={setAutoBackup} disabled={!google.connected} />
               </div>
-              <button onClick={onBackup} disabled={!google.connected || busy}
+              <button onClick={() => importRef.current?.click()} disabled={importing}
                 className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-sky-500 text-white text-sm font-medium hover:bg-sky-600 disabled:opacity-40">
-                <UploadCloud size={15} /> {busy ? "백업 중..." : "지금 백업"}
+                {importing ? <Loader2 size={15} className="animate-spin" /> : <UploadCloud size={15} />}
+                {importing
+                  ? importProgress
+                    ? `가져오는 중... ${importProgress.done}/${importProgress.total}`
+                    : "가져오는 중..."
+                  : "JSON 파일 선택"}
               </button>
-              {lastBackup && <div className={`text-xs ${T.sub}`}>마지막 백업: {lastBackup}</div>}
-              {backups.length > 0 && (
-                <div className={`rounded-lg border ${T.border} overflow-hidden`}>
-                  {backups.map((b, i) => (
-                    <div key={b.id}
-                      className={`flex items-center justify-between px-3 py-2.5 ${i > 0 ? `border-t ${T.border}` : ""}`}>
-                      <span className={`text-xs font-medium ${T.text}`}>
-                        {b.name.replace(BACKUP_PREFIX, "").replace(".json", "")}
-                      </span>
-                      <button
-                        onClick={() => { onRestore(b); setRestoredId(b.id); }}
-                        className="flex items-center gap-1 text-xs text-sky-500 hover:opacity-70">
-                        {restoredId === b.id ? <><Check size={13} /> 복원됨</> : <><RotateCcw size={13} /> 복원</>}
-                      </button>
-                    </div>
-                  ))}
+              <input ref={importRef} type="file" accept="application/json,.json" className="hidden"
+                onChange={(e) => { handleImport(e.target.files[0]); e.target.value = ""; }} />
+              {importResult && (
+                <div className={`text-xs flex items-center gap-1 ${importResult.startsWith("✅") ? "text-emerald-500" : "text-red-500"}`}>
+                  {importResult.startsWith("✅") && <Check size={13} />}
+                  {importResult}
                 </div>
-              )}
-              {!google.connected && (
-                <div className={`text-xs ${T.sub}`}>백업을 사용하려면 먼저 Google 계정을 연결하세요.</div>
               )}
             </div>
           </Section>
@@ -819,10 +771,64 @@ function BottomNav({ onWrite }) {
   );
 }
 
+/* ---------- 로그인 화면 ---------- */
+function LoginScreen({ T }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const login = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await signInWithGoogle();
+    } catch (e) {
+      console.error("로그인 실패:", e);
+      if (e.code !== "auth/popup-closed-by-user" && e.code !== "auth/cancelled-popup-request")
+        setError("로그인에 실패했어요. 잠시 후 다시 시도해주세요");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className={`min-h-screen ${T.bg} flex flex-col items-center justify-center px-8`}>
+      <h1 className={`text-4xl font-bold mb-2 ${T.text}`} style={{ fontFamily: "'Segoe Script','cursive'" }}>
+        LifeLog
+      </h1>
+      <p className={`text-sm mb-10 ${T.sub}`}>나만의 일기장 · 어느 기기에서나 같은 기록</p>
+      <button onClick={login} disabled={busy}
+        className={`w-full max-w-xs flex items-center justify-center gap-2 py-3 rounded-xl border ${T.border} ${T.card} text-sm font-medium ${T.text} hover:opacity-80 disabled:opacity-40`}>
+        {busy ? (
+          <Loader2 size={16} className="animate-spin" />
+        ) : (
+          <span className="font-bold bg-gradient-to-r from-blue-500 via-red-500 to-amber-500 bg-clip-text text-transparent">G</span>
+        )}
+        Google 계정으로 시작하기
+      </button>
+      {error && <p className="mt-4 text-xs text-red-500">{error}</p>}
+    </div>
+  );
+}
+
+/* ---------- Firebase 설정 안내 화면 (firebase-config.js 미입력 시) ---------- */
+function SetupNotice({ T }) {
+  return (
+    <div className={`min-h-screen ${T.bg} flex flex-col items-center justify-center px-8 text-center`}>
+      <h1 className={`text-2xl font-bold mb-3 ${T.text}`}>Firebase 설정이 필요해요</h1>
+      <p className={`text-sm ${T.sub} leading-relaxed`}>
+        <code>src/firebase-config.js</code>에 Firebase 콘솔의<br />
+        웹 앱 설정(firebaseConfig)을 붙여넣어주세요.<br />
+        자세한 순서는 <code>FIREBASE_SETUP.md</code>를 참고하세요.
+      </p>
+    </div>
+  );
+}
+
 /* ---------- App (루트) ---------- */
 export default function LifeLogApp() {
-  const [dark, setDark] = useState(false);
-  const [entries, setEntries] = useState(MOCK_ENTRIES);
+  const [dark, setDark] = useState(() => {
+    try { return localStorage.getItem("lifelog-theme") === "dark"; } catch { return false; }
+  });
+  const [user, setUser] = useState(undefined); // undefined=확인 중, null=미로그인
+  const [entries, setEntries] = useState([]);
   const [view, setView] = useState("feed"); // feed | grid | calendar | scrap
   const [filter, setFilter] = useState({ mood: null, tag: null, query: "" });
   const [writeOpen, setWriteOpen] = useState(false);
@@ -830,123 +836,73 @@ export default function LifeLogApp() {
   const [viewer, setViewer] = useState(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
-  /* 설정: 구글 연동 + 백업 */
-  const [google, setGoogle] = useState({ connected: false, email: null, token: null });
-  const [backups, setBackups] = useState([]); // [{id, name, time, data?}]
-  const [autoBackup, setAutoBackup] = useState(false);
-  const [lastBackup, setLastBackup] = useState(null);
-  const [backupBusy, setBackupBusy] = useState(false);
-
-  const connectGoogle = async () => {
-    if (DEMO_MODE) {
-      setGoogle({ connected: true, email: "sho90427@gmail.com", token: null });
-      return;
-    }
-    try {
-      await loadGis();
-      window.google.accounts.oauth2
-        .initTokenClient({
-          client_id: GOOGLE_CLIENT_ID,
-          scope: "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.email",
-          callback: async ({ access_token }) => {
-            const u = await gFetch(access_token, "https://www.googleapis.com/oauth2/v3/userinfo").then((r) => r.json());
-            setGoogle({ connected: true, email: u.email, token: access_token });
-            const files = await driveList(access_token);
-            setBackups(files.slice(0, MAX_BACKUP_DAYS).map((f) => ({ id: f.id, name: f.name, time: f.modifiedTime })));
-          },
-        })
-        .requestAccessToken();
-    } catch (e) {
-      console.error("Google 연동 실패:", e);
-    }
-  };
-
-  const disconnectGoogle = () => {
-    setGoogle({ connected: false, email: null, token: null });
-    setBackups([]);
-    setAutoBackup(false);
-  };
-
-  const runBackup = async () => {
-    if (!google.connected || backupBusy) return;
-    setBackupBusy(true);
-    const name = backupName(todayStr());
-    try {
-      if (DEMO_MODE || !google.token) {
-        /* 데모: 메모리 시뮬레이션 (같은 날 덮어쓰기 + 7일 초과분 삭제) */
-        setBackups((bs) =>
-          [{ id: `demo-${Date.now()}`, name, time: new Date().toISOString(), data: JSON.stringify(entries) },
-            ...bs.filter((b) => b.name !== name)]
-            .sort((a, b) => b.name.localeCompare(a.name))
-            .slice(0, MAX_BACKUP_DAYS));
-      } else {
-        const files = await driveList(google.token);
-        const same = files.find((f) => f.name === name);
-        await driveUpload(google.token, name, JSON.stringify(entries), same?.id);
-        const after = await driveList(google.token);
-        for (const f of after.slice(MAX_BACKUP_DAYS)) await driveDelete(google.token, f.id); // 7일 초과분 삭제
-        setBackups(after.slice(0, MAX_BACKUP_DAYS).map((f) => ({ id: f.id, name: f.name, time: f.modifiedTime })));
-      }
-      setLastBackup(new Date().toLocaleString("ko-KR"));
-    } catch (e) {
-      console.error("백업 실패:", e);
-    } finally {
-      setBackupBusy(false);
-    }
-  };
-
-  const restoreBackup = async (b) => {
-    try {
-      const data = DEMO_MODE || !google.token ? JSON.parse(b.data) : await driveDownload(google.token, b.id);
-      if (Array.isArray(data)) setEntries(data);
-    } catch (e) {
-      console.error("복원 실패:", e);
-    }
-  };
-
-  /* 자동 백업: 연동 + 자동백업 ON 상태에서 오늘자 백업이 없으면 실행 */
+  /* 테마 영속화 */
   useEffect(() => {
-    if (autoBackup && google.connected && !backups.some((b) => b.name === backupName(todayStr()))) {
-      runBackup();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoBackup, google.connected]);
+    try { localStorage.setItem("lifelog-theme", dark ? "dark" : "light"); } catch { /* noop */ }
+  }, [dark]);
+
+  /* 인증 상태 구독 */
+  useEffect(() => {
+    if (!CONFIG_READY) return;
+    return onAuthStateChanged(auth, setUser);
+  }, []);
+
+  /* Firestore 실시간 구독 (로그인 시) */
+  useEffect(() => {
+    if (!user) { setEntries([]); return; }
+    return subscribeLogs(user.uid, setEntries, (e) => console.error("동기화 오류:", e));
+  }, [user]);
+
+  /* 열려 있는 뷰어를 최신 데이터와 동기화 (수정/삭제 반영) */
+  useEffect(() => {
+    setViewer((v) => (v ? entries.find((e) => e.id === v.id) || null : v));
+  }, [entries]);
 
   /* 테마 토큰 (라이트/다크) */
   const T = dark
     ? { bg: "bg-black", card: "bg-neutral-900", text: "text-neutral-100", sub: "text-neutral-400", subRaw: "text-neutral-500", border: "border-neutral-800", input: "bg-neutral-800", icon: "text-neutral-100" }
     : { bg: "bg-neutral-50", card: "bg-white", text: "text-neutral-900", sub: "text-neutral-500", subRaw: "text-neutral-400", border: "border-neutral-200", input: "bg-neutral-100", icon: "text-neutral-900" };
 
-  /* CRUD */
-  const addEntry = (data) => setEntries((es) => [{ ...data, id: Date.now() }, ...es]);
+  if (!CONFIG_READY) return <SetupNotice T={T} />;
+  if (user === undefined)
+    return (
+      <div className={`min-h-screen ${T.bg} flex items-center justify-center`}>
+        <Loader2 size={28} className={`animate-spin ${T.sub}`} />
+      </div>
+    );
+  if (!user) return <LoginScreen T={T} />;
+
+  /* CRUD → Firestore (화면 반영은 onSnapshot이 담당) */
+  const addEntry = (data) => createLog(user.uid, data);
   const updateEntry = (entry) => {
-    setEntries((es) => es.map((e) => (e.id === entry.id ? entry : e)));
-    setViewer((v) => (v && v.id === entry.id ? entry : v));
+    const prev = entries.find((e) => e.id === entry.id);
+    return updateLog(user.uid, prev?.images || [], entry);
   };
   const deleteEntry = (id) => {
-    setEntries((es) => es.filter((e) => e.id !== id));
-    setViewer((v) => (v && v.id === id ? null : v));
+    const entry = entries.find((e) => e.id === id);
+    if (entry) deleteLog(user.uid, entry).catch((e) => console.error("삭제 실패:", e));
   };
   const openEdit = (entry) => { setEditTarget(entry); setWriteOpen(true); };
-  const toggleScrap = (id) =>
-    setEntries((es) => es.map((e) => (e.id === id ? { ...e, scrapped: !e.scrapped } : e)));
+  const toggleScrap = (id) => {
+    const entry = entries.find((e) => e.id === id);
+    if (entry) setScrap(user.uid, id, !entry.scrapped).catch((e) => console.error("스크랩 실패:", e));
+  };
 
   /* 필터링 + 최신순 정렬 */
-  const filtered = useMemo(() => {
-    return entries
-      .filter((e) => {
-        if (filter.mood && e.mood !== filter.mood) return false;
-        if (filter.tag && !extractTags(e.text).includes(filter.tag)) return false;
-        if (filter.query) {
-          const q = filter.query.toLowerCase();
-          if (!(`${e.text} ${e.location}`.toLowerCase().includes(q))) return false;
-        }
-        return true;
-      })
-      .sort((a, b) => b.date.localeCompare(a.date));
-  }, [entries, filter]);
+  const filtered = entries
+    .filter((e) => {
+      if (filter.mood && e.mood !== filter.mood) return false;
+      if (filter.tag && !extractTags(e.text).includes(filter.tag)) return false;
+      if (filter.query) {
+        const q = filter.query.toLowerCase();
+        if (!(`${e.text} ${e.location}`.toLowerCase().includes(q))) return false;
+      }
+      return true;
+    })
+    .sort((a, b) => b.date.localeCompare(a.date));
 
-  const ctx = { T, dark, setDark, entries, filter, setFilter, view, setView, addEntry, updateEntry, deleteEntry, openEdit, toggleScrap };
+  const uname = user.email ? user.email.split("@")[0] : "my.diary";
+  const ctx = { T, dark, setDark, user, uname, entries, filter, setFilter, view, setView, addEntry, updateEntry, deleteEntry, openEdit, toggleScrap };
 
   return (
     <DiaryContext.Provider value={ctx}>
@@ -975,21 +931,7 @@ export default function LifeLogApp() {
 
         {writeOpen && <WritePage initial={editTarget} onClose={() => setWriteOpen(false)} />}
         {viewer && <ViewerModal entry={viewer} onClose={() => setViewer(null)} />}
-        {settingsOpen && (
-          <SettingsModal
-            onClose={() => setSettingsOpen(false)}
-            google={google}
-            onConnect={connectGoogle}
-            onDisconnect={disconnectGoogle}
-            backups={backups}
-            lastBackup={lastBackup}
-            autoBackup={autoBackup}
-            setAutoBackup={setAutoBackup}
-            onBackup={runBackup}
-            onRestore={restoreBackup}
-            busy={backupBusy}
-          />
-        )}
+        {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
       </div>
     </DiaryContext.Provider>
   );
