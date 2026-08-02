@@ -1,0 +1,26 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* DayPic 감성: 깔끔한 시스템 산세리프 (한글 렌더링 최적) */
+html,
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo",
+    "Pretendard", "Noto Sans KR", "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* 월 워드마크 유틸 */
+.font-display {
+  font-family: "Anton", "Arial Narrow", sans-serif;
+  letter-spacing: 0.01em;
+}
+
+/* 가로 스크롤바 숨김 */
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
