@@ -83,34 +83,37 @@ const hourOf = (e) => {
   return null;
 };
 
-/* ---------- GPS 현재 위치 → 장소명 (Nominatim 역지오코딩, API 키 불필요) ---------- */
+/* ---------- 좌표 → 장소명 (Nominatim 역지오코딩, API 키 불필요) ---------- */
+const reverseGeocode = async (lat, lon) => {
+  try {
+    const r = await fetch(
+      `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&accept-language=ko&zoom=16`,
+      { headers: { Accept: "application/json" } }
+    );
+    const d = await r.json();
+    const a = d.address || {};
+    const name = [
+      a.city || a.town || a.village || a.county || "",
+      a.borough || a.city_district || a.district || "",
+      a.suburb || a.neighbourhood || a.quarter || a.road || "",
+    ].filter(Boolean).join(" ").trim();
+    return (
+      name ||
+      (d.display_name ? d.display_name.split(",").slice(0, 2).map((s) => s.trim()).reverse().join(" ") : "") ||
+      `${(+lat).toFixed(4)}, ${(+lon).toFixed(4)}`
+    );
+  } catch {
+    return `${(+lat).toFixed(4)}, ${(+lon).toFixed(4)}`;
+  }
+};
+
+/* ---------- GPS 현재 위치 → 장소명 ---------- */
 const getCurrentPlace = () =>
   new Promise((resolve, reject) => {
     if (!navigator.geolocation)
       return reject(new Error("이 기기는 위치 기능을 지원하지 않아요"));
     navigator.geolocation.getCurrentPosition(
-      async ({ coords: { latitude: lat, longitude: lon } }) => {
-        try {
-          const r = await fetch(
-            `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&accept-language=ko&zoom=16`,
-            { headers: { Accept: "application/json" } }
-          );
-          const d = await r.json();
-          const a = d.address || {};
-          const name = [
-            a.city || a.town || a.village || a.county || "",
-            a.borough || a.city_district || a.district || "",
-            a.suburb || a.neighbourhood || a.quarter || a.road || "",
-          ].filter(Boolean).join(" ").trim();
-          resolve(
-            name ||
-            (d.display_name ? d.display_name.split(",").slice(0, 2).map((s) => s.trim()).reverse().join(" ") : "") ||
-            `${lat.toFixed(4)}, ${lon.toFixed(4)}`
-          );
-        } catch {
-          resolve(`${lat.toFixed(4)}, ${lon.toFixed(4)}`);
-        }
-      },
+      async ({ coords: { latitude: lat, longitude: lon } }) => resolve(await reverseGeocode(lat, lon)),
       (err) =>
         reject(new Error(
           err.code === 1
@@ -120,6 +123,83 @@ const getCurrentPlace = () =>
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
     );
   });
+
+/* ---------- 사진 EXIF에서 GPS 좌표 추출 (JPEG, 라이브러리 없이 직접 파싱) ---------- */
+function parseTiffGps(view, tiff) {
+  const little = view.getUint16(tiff) === 0x4949; // "II" = little-endian
+  const u16 = (o) => view.getUint16(o, little);
+  const u32 = (o) => view.getUint32(o, little);
+  if (u16(tiff + 2) !== 0x002a) return null;
+  const ifd0 = tiff + u32(tiff + 4);
+  const count0 = u16(ifd0);
+  let gpsPtr = 0;
+  for (let i = 0; i < count0; i++) {
+    const entry = ifd0 + 2 + i * 12;
+    if (u16(entry) === 0x8825) { gpsPtr = tiff + u32(entry + 8); break; } // GPS IFD 포인터
+  }
+  if (!gpsPtr) return null;
+  const gpsCount = u16(gpsPtr);
+  const readRationals = (entry, n) => {
+    const off = tiff + u32(entry + 8);
+    const out = [];
+    for (let k = 0; k < n; k++) {
+      const num = u32(off + k * 8);
+      const den = u32(off + k * 8 + 4);
+      out.push(den ? num / den : 0);
+    }
+    return out;
+  };
+  let latRef, lonRef, lat, lon;
+  for (let i = 0; i < gpsCount; i++) {
+    const entry = gpsPtr + 2 + i * 12;
+    const tag = u16(entry);
+    if (tag === 1) latRef = String.fromCharCode(view.getUint8(entry + 8));
+    else if (tag === 3) lonRef = String.fromCharCode(view.getUint8(entry + 8));
+    else if (tag === 2) { const d = readRationals(entry, 3); lat = d[0] + d[1] / 60 + d[2] / 3600; }
+    else if (tag === 4) { const d = readRationals(entry, 3); lon = d[0] + d[1] / 60 + d[2] / 3600; }
+  }
+  if (lat == null || lon == null) return null;
+  if (latRef === "S") lat = -lat;
+  if (lonRef === "W") lon = -lon;
+  return { lat, lon };
+}
+
+function parseExifGps(view) {
+  if (view.getUint16(0) !== 0xffd8) return null; // JPEG SOI
+  const len = view.byteLength;
+  let offset = 2;
+  while (offset + 4 < len) {
+    if (view.getUint8(offset) !== 0xff) break;
+    const marker = view.getUint8(offset + 1);
+    if (marker === 0xe1) { // APP1 (EXIF)
+      const app1 = offset + 4;
+      if (view.getUint32(app1) !== 0x45786966) return null; // "Exif"
+      return parseTiffGps(view, app1 + 6);
+    }
+    if (marker === 0xda) break; // SOS: 이미지 데이터 시작
+    offset += 2 + view.getUint16(offset + 2);
+  }
+  return null;
+}
+
+const readExifGps = (file) =>
+  new Promise((resolve) => {
+    if (!file || !/jpe?g/i.test(`${file.type || ""} ${file.name || ""}`)) return resolve(null);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try { resolve(parseExifGps(new DataView(e.target.result))); }
+      catch { resolve(null); }
+    };
+    reader.onerror = () => resolve(null);
+    reader.readAsArrayBuffer(file.slice(0, 256 * 1024)); // EXIF는 파일 앞부분에만 존재
+  });
+
+/* 사진 파일 → EXIF GPS → 장소명 (없으면 null) */
+const getPlaceFromFile = async (file) => {
+  const gps = await readExifGps(file);
+  if (!gps) return null;
+  return reverseGeocode(gps.lat, gps.lon);
+};
 
 /* ---------- Context (전역 상태) ---------- */
 const DiaryContext = createContext(null);
@@ -419,29 +499,73 @@ function CalendarView() {
           );
         })}
       </div>
-      <p className={`mt-5 text-center text-xs ${T.sub}`}>기록이 있는 날짜를 누르면 그날의 일기가 열려요</p>
     </div>
   );
 }
 
-/* ---------- 리스트 뷰 — 월간 사진 타일 (3열) + 격자/피드 토글 ---------- */
-function ListView() {
-  const { T, accent, month, monthEntries, openDay, openEntry } = useDiary();
-  const [mode, setMode] = useState("grid"); // grid | feed
+/* ---------- 격자 뷰 — 월간 사진 타일 (3열, 정사각형) ---------- */
+function GridView() {
+  const { T, monthEntries, openEntry } = useDiary();
   const sorted = useMemo(
     () => [...monthEntries].sort((a, b) => b.date.localeCompare(a.date)),
     [monthEntries]
   );
+  if (sorted.length === 0) return <EmptyMonth T={T} />;
+  return (
+    <div className="grid grid-cols-3 gap-[3px] px-3 mt-3">
+      {sorted.map((e) => (
+        <button key={e.id} onClick={() => openEntry(e)} className="relative aspect-square rounded-lg overflow-hidden group">
+          <Img img={e.images[0]} />
+          <div className="absolute inset-0 bg-gradient-to-b from-black/45 via-transparent to-transparent" />
+          <span className="absolute top-1.5 left-2 text-xs font-bold text-white drop-shadow">{+e.date.slice(8)}</span>
+          {e.images.length > 1 && <Layers size={14} className="absolute top-1.5 right-1.5 text-white drop-shadow" />}
+        </button>
+      ))}
+    </div>
+  );
+}
 
+/* ---------- 피드 뷰 — 월간 일기 카드 ---------- */
+function FeedView() {
+  const { T, monthEntries } = useDiary();
+  const sorted = useMemo(
+    () => [...monthEntries].sort((a, b) => b.date.localeCompare(a.date)),
+    [monthEntries]
+  );
+  if (sorted.length === 0) return <EmptyMonth T={T} />;
+  return (
+    <div className="max-w-md mx-auto px-4 space-y-4 mt-4">
+      {sorted.map((e) => <DiaryCard key={e.id} entry={e} />)}
+    </div>
+  );
+}
+
+function EmptyMonth({ T }) {
+  return (
+    <div className={`text-center py-20 ${T.sub} text-sm`}>
+      <ImageIcon size={40} className="mx-auto mb-3 opacity-40" />
+      이번 달 기록이 아직 없어요
+    </div>
+  );
+}
+
+/* ---------- 홈 뷰 — 캘린더 · 격자 · 피드 (탭 통합) ---------- */
+const HOME_TABS = [
+  { id: "calendar", icon: CalendarIcon, label: "캘린더" },
+  { id: "grid", icon: LayoutGrid, label: "격자" },
+  { id: "feed", icon: Rows, label: "피드" },
+];
+function HomeView() {
+  const { T, accent } = useDiary();
+  const [tab, setTab] = useState("calendar"); // calendar | grid | feed
   return (
     <div className="mt-4">
-      {/* 격자/피드 토글 */}
-      <div className="px-4 flex justify-center mb-3">
+      <div className="px-4 flex justify-center">
         <div className={`inline-flex p-0.5 rounded-full ${T.input}`}>
-          {[{ id: "grid", icon: LayoutGrid, label: "격자" }, { id: "feed", icon: Rows, label: "피드" }].map(({ id, icon: Icon, label }) => {
-            const on = mode === id;
+          {HOME_TABS.map(({ id, icon: Icon, label }) => {
+            const on = tab === id;
             return (
-              <button key={id} onClick={() => setMode(id)}
+              <button key={id} onClick={() => setTab(id)}
                 className={`flex items-center gap-1.5 px-4 py-1.5 rounded-full text-xs font-semibold transition-colors ${on ? "text-white" : T.sub}`}
                 style={on ? { backgroundColor: accent } : undefined}>
                 <Icon size={13} /> {label}
@@ -450,115 +574,146 @@ function ListView() {
           })}
         </div>
       </div>
-
-      {sorted.length === 0 ? (
-        <div className={`text-center py-20 ${T.sub} text-sm`}>
-          <ImageIcon size={40} className="mx-auto mb-3 opacity-40" />
-          이번 달 기록이 아직 없어요
-        </div>
-      ) : mode === "grid" ? (
-        <div className="grid grid-cols-3 gap-[3px] px-3">
-          {sorted.map((e) => (
-            <button key={e.id} onClick={() => openEntry(e)} className="relative aspect-[4/5] rounded-lg overflow-hidden group">
-              <Img img={e.images[0]} />
-              <div className="absolute inset-0 bg-gradient-to-b from-black/45 via-transparent to-transparent" />
-              <span className="absolute top-1.5 left-2 text-xs font-bold text-white drop-shadow">{+e.date.slice(8)}</span>
-              {e.images.length > 1 && <Layers size={14} className="absolute top-1.5 right-1.5 text-white drop-shadow" />}
-            </button>
-          ))}
-        </div>
-      ) : (
-        <div className="max-w-md mx-auto px-4 space-y-4">
-          {sorted.map((e) => <DiaryCard key={e.id} entry={e} />)}
-        </div>
-      )}
+      {tab === "calendar" && <CalendarView />}
+      {tab === "grid" && <GridView />}
+      {tab === "feed" && <FeedView />}
       <div className="h-2" />
-      <p className={`text-center text-xs ${T.sub} pt-1`}>사진을 누르면 그날의 일기가 열려요</p>
     </div>
   );
 }
 
 /* ---------- 막대 그래프 (리포트 공용) ---------- */
-function Bars({ data, accent, T }) {
+function Bars({ data, accent, T, showCount = true }) {
   const max = Math.max(1, ...data.map((d) => d.v));
   return (
-    <div className="flex items-end justify-between gap-2 h-28">
+    <div className="flex items-end justify-between gap-1.5 h-28">
       {data.map((d, i) => (
         <div key={i} className="flex-1 flex flex-col items-center justify-end h-full">
           <div className="w-full flex-1 flex items-end justify-center">
-            <div className="w-2.5 rounded-full transition-all"
+            <div className="w-2 rounded-full transition-all"
               style={{ height: `${(d.v / max) * 100}%`, minHeight: d.v ? 6 : 4, backgroundColor: d.v ? accent : accent + "33" }} />
           </div>
           <div className={`mt-2 text-[11px] font-medium ${T.sub}`}>{d.label}</div>
-          <div className={`text-[10px] ${T.sub} opacity-70`}>{d.v}회</div>
+          {showCount && <div className={`text-[10px] ${T.sub} opacity-70`}>{d.v}회</div>}
         </div>
       ))}
     </div>
   );
 }
 
-/* ---------- 월간 리포트 뷰 ---------- */
+/* ---------- 통계 뷰 (최근 365일 기준) ---------- */
 function ReportView() {
-  const { T, accent, month, monthEntries } = useDiary();
-  const daysInMonth = new Date(month.y, month.m + 1, 0).getDate();
-  const recorded = new Set(monthEntries.map((e) => e.date)).size;
-  const pct = daysInMonth ? (recorded / daysInMonth) * 100 : 0;
+  const { T, accent, entries } = useDiary();
+
+  /* 최근 365일 윈도우 */
+  const { yearEntries, sinceStr } = useMemo(() => {
+    const now = new Date();
+    const since = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 364);
+    const s = `${since.getFullYear()}-${pad2(since.getMonth() + 1)}-${pad2(since.getDate())}`;
+    return { yearEntries: entries.filter((e) => e.date >= s), sinceStr: s };
+  }, [entries]);
+
+  const recordedDays = useMemo(() => new Set(yearEntries.map((e) => e.date)).size, [yearEntries]);
+  const pct = (recordedDays / 365) * 100;
+  const tagCount = useMemo(() => new Set(yearEntries.flatMap((e) => extractTags(e.text))).size, [yearEntries]);
+  const activeMonths = useMemo(() => new Set(yearEntries.map((e) => e.date.slice(0, 7))).size, [yearEntries]);
 
   const weekday = useMemo(() => {
     const c = [0, 0, 0, 0, 0, 0, 0];
-    monthEntries.forEach((e) => { c[parseDate(e.date).getDay()]++; });
+    yearEntries.forEach((e) => { c[parseDate(e.date).getDay()]++; });
     return ["일", "월", "화", "수", "목", "금", "토"].map((label, i) => ({ label, v: c[i] }));
-  }, [monthEntries]);
+  }, [yearEntries]);
 
   const timeOfDay = useMemo(() => {
     const c = [0, 0, 0, 0, 0, 0];
-    monthEntries.forEach((e) => { const h = hourOf(e); if (h != null) c[Math.floor(h / 4)]++; });
-    return ["00-04", "04-08", "08-12", "12-16", "16-20", "20-24"].map((label, i) => ({ label, v: c[i] }));
-  }, [monthEntries]);
+    yearEntries.forEach((e) => { const h = hourOf(e); if (h != null) c[Math.floor(h / 4)]++; });
+    return ["0-4", "4-8", "8-12", "12-16", "16-20", "20-24"].map((label, i) => ({ label, v: c[i] }));
+  }, [yearEntries]);
+
+  const monthly = useMemo(() => {
+    const now = new Date();
+    const buckets = [];
+    const map = {};
+    for (let i = 11; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const key = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
+      const b = { key, label: `${d.getMonth() + 1}`, v: 0 };
+      buckets.push(b); map[key] = b;
+    }
+    yearEntries.forEach((e) => { const b = map[e.date.slice(0, 7)]; if (b) b.v++; });
+    return buckets;
+  }, [yearEntries]);
 
   const words = useMemo(() => {
     const cnt = {};
-    monthEntries.forEach((e) => extractTags(e.text).forEach((t) => { cnt[t] = (cnt[t] || 0) + 1; }));
+    yearEntries.forEach((e) => extractTags(e.text).forEach((t) => { cnt[t] = (cnt[t] || 0) + 1; }));
     let arr = Object.entries(cnt).map(([w, v]) => ({ w, v }));
     if (arr.length === 0) {
       const mc = {};
-      monthEntries.forEach((e) => { const m = moodOf(e.mood); if (m) mc[m.label] = (mc[m.label] || 0) + 1; });
+      yearEntries.forEach((e) => { const m = moodOf(e.mood); if (m) mc[m.label] = (mc[m.label] || 0) + 1; });
       arr = Object.entries(mc).map(([w, v]) => ({ w, v }));
     }
     return arr.sort((a, b) => b.v - a.v).slice(0, 5);
-  }, [monthEntries]);
+  }, [yearEntries]);
   const wordMax = Math.max(1, ...words.map((w) => w.v));
   const hasTime = timeOfDay.some((t) => t.v > 0);
 
+  const Stat = ({ n, label }) => (
+    <div className="text-center">
+      <div className={`text-lg font-bold ${T.text}`}>{n}</div>
+      <div className={`text-[11px] ${T.sub}`}>{label}</div>
+    </div>
+  );
+  const Card = ({ title, children }) => (
+    <div className={`rounded-2xl border ${T.border} p-4 ${T.card}`}>
+      <div className={`text-[11px] font-semibold ${T.sub} mb-3`}>{title}</div>
+      {children}
+    </div>
+  );
+
   return (
     <div className="max-w-md mx-auto pb-4">
-      <MonthHeader overline="MONTHLY REPORT" />
-      <div className="px-4 mt-5 space-y-4">
-        {/* OVERVIEW */}
+      <div className="px-4 pt-6 pb-1">
+        <div className={`text-[11px] font-bold tracking-[0.2em] ${T.sub}`}>LIFELOG</div>
+        <div className={`text-xl font-bold ${T.text}`}>통계</div>
+      </div>
+      <div className="px-4 mt-3 space-y-4">
+        {/* OVERVIEW · 최근 365일 */}
         <div className="rounded-2xl p-4" style={{ boxShadow: `0 0 0 2px ${accent}` }}>
-          <div className={`text-[11px] font-bold tracking-widest ${T.sub} mb-1`}>OVERVIEW</div>
+          <div className={`text-[11px] font-bold tracking-widest ${T.sub} mb-1`}>OVERVIEW · 최근 365일</div>
           <div className="flex items-end justify-between">
             <div className="flex items-end gap-1">
-              <span className="text-3xl font-extrabold" style={{ color: accent }}>{recorded}</span>
-              <span className={`text-sm ${T.sub} mb-1`}>/ {daysInMonth}일</span>
+              <span className="text-3xl font-extrabold" style={{ color: accent }}>{recordedDays}</span>
+              <span className={`text-sm ${T.sub} mb-1`}>/ 365일</span>
             </div>
-            <span className={`text-sm font-semibold ${T.text}`}>{pct.toFixed(1)}% 달성</span>
+            <span className={`text-sm font-semibold ${T.text}`}>{pct.toFixed(1)}% 기록</span>
           </div>
           <div className="h-2 rounded-full overflow-hidden mt-2" style={{ backgroundColor: accent + "26" }}>
             <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: accent }} />
           </div>
-
-          <div className={`mt-5 pt-4 border-t ${T.border}`}>
-            <div className={`text-[11px] font-semibold ${T.sub} mb-2`}>요일별 기록</div>
-            <Bars data={weekday} accent={accent} T={T} />
+          <div className={`grid grid-cols-3 gap-2 mt-4 pt-4 border-t ${T.border}`}>
+            <Stat n={yearEntries.length} label="총 기록" />
+            <Stat n={tagCount} label="태그" />
+            <Stat n={activeMonths} label="기록한 달" />
           </div>
-          {hasTime && (
-            <div className={`mt-4 pt-4 border-t ${T.border}`}>
-              <div className={`text-[11px] font-semibold ${T.sub} mb-2`}>시간대별 기록</div>
-              <Bars data={timeOfDay} accent={accent} T={T} />
-            </div>
-          )}
         </div>
+
+        {/* 시간대별 */}
+        {hasTime && (
+          <Card title="시간대별 기록">
+            <Bars data={timeOfDay} accent={accent} T={T} />
+          </Card>
+        )}
+
+        {/* 요일별 */}
+        <Card title="요일별 기록">
+          <Bars data={weekday} accent={accent} T={T} />
+        </Card>
+
+        {/* 월별 */}
+        <Card title="월별 기록 (최근 12개월)">
+          <Bars data={monthly} accent={accent} T={T} showCount={false} />
+        </Card>
 
         {/* MY WORDS */}
         <div className={`rounded-2xl border ${T.border} p-4 ${T.card}`}>
@@ -704,7 +859,7 @@ function SearchOverlay({ onClose }) {
 
 /* ---------- 작성 / 편집 전체 페이지 ---------- */
 function WritePage({ initial, onClose }) {
-  const { T, accent, addEntry, updateEntry } = useDiary();
+  const { T, accent, dark, addEntry, updateEntry } = useDiary();
   const editing = !!initial?.id;
   const [date, setDate] = useState(initial?.date || todayStr());
   const [text, setText] = useState(initial?.text || "");
@@ -713,6 +868,8 @@ function WritePage({ initial, onClose }) {
   const [images, setImages] = useState(initial?.images || []);
   const [saving, setSaving] = useState(false);
   const [locating, setLocating] = useState(false);
+  const [autoLoc, setAutoLoc] = useState(false);
+  const [autoFilled, setAutoFilled] = useState(false);
   const [locError, setLocError] = useState(null);
   const fileRef = useRef(null);
   const tags = extractTags(text);
@@ -720,18 +877,36 @@ function WritePage({ initial, onClose }) {
   const fillCurrentLocation = async () => {
     setLocError(null);
     setLocating(true);
-    try { setLocation(await getCurrentPlace()); }
+    try { setLocation(await getCurrentPlace()); setAutoFilled(false); }
     catch (e) { setLocError(e.message); }
     finally { setLocating(false); }
   };
 
+  /* 사진 EXIF의 GPS로 장소 자동 채우기 (위치가 비어 있을 때만) */
+  const tryAutoLocation = async (files) => {
+    if (location.trim()) return;
+    setAutoLoc(true);
+    try {
+      for (const f of files) {
+        const place = await getPlaceFromFile(f).catch(() => null);
+        if (place) {
+          setLocation((cur) => (cur.trim() ? cur : place));
+          setAutoFilled(true);
+          break;
+        }
+      }
+    } finally { setAutoLoc(false); }
+  };
+
   const addPhotos = (files) => {
-    [...files].slice(0, 5 - images.length).forEach((f) => {
+    const arr = [...files].slice(0, 5 - images.length);
+    arr.forEach((f) => {
       const r = new FileReader();
       r.onload = (ev) => setImages((imgs) =>
         imgs.length < 5 ? [...imgs, { type: "photo", preview: ev.target.result, file: f }] : imgs);
       r.readAsDataURL(f);
     });
+    tryAutoLocation(arr.filter((f) => f instanceof Blob));
   };
   const addGradient = () => {
     if (images.length >= 5) return;
@@ -829,30 +1004,44 @@ function WritePage({ initial, onClose }) {
               <span className={`text-xs font-medium ${T.sub}`}>위치</span>
               <div className={`mt-1 flex items-center gap-1.5 ${T.input} rounded-xl px-3 py-2`}>
                 <MapPin size={14} className={T.sub} />
-                <input value={location} onChange={(e) => setLocation(e.target.value)}
-                  placeholder="장소 추가"
+                <input value={location}
+                  onChange={(e) => { setLocation(e.target.value); setAutoFilled(false); }}
+                  placeholder={autoLoc ? "사진 위치 확인 중…" : "장소 추가"}
                   className={`flex-1 min-w-0 bg-transparent text-sm outline-none ${T.text}`} />
                 <button type="button" onClick={fillCurrentLocation} disabled={locating}
                   title="현재 위치 자동 입력" className="flex-shrink-0 disabled:opacity-50">
-                  <LocateFixed size={15} style={locating ? { color: accent } : undefined}
-                    className={locating ? "animate-pulse" : T.sub} />
+                  <LocateFixed size={15} style={locating || autoLoc ? { color: accent } : undefined}
+                    className={locating || autoLoc ? "animate-pulse" : T.sub} />
                 </button>
               </div>
             </label>
           </div>
+          {autoFilled && !locError && (
+            <p className="text-xs -mt-2 flex items-center gap-1" style={{ color: accent }}>
+              <MapPin size={11} /> 사진의 위치 정보로 자동 입력했어요 · 필요하면 수정하세요
+            </p>
+          )}
           {locError && <p className="text-xs text-red-500 -mt-2">{locError}</p>}
 
           {/* 오늘의 기분 */}
           <div>
             <div className={`text-xs font-medium mb-2 ${T.sub}`}>오늘의 기분</div>
-            <div className="flex flex-wrap gap-2">
+            <div className="flex gap-1.5">
               {MOODS.map((m) => {
                 const on = mood === m.id;
                 return (
-                  <button key={m.id} onClick={() => setMood(on ? null : m.id)}
-                    className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-all ${on ? "text-white border-transparent scale-105" : `${T.card} ${T.text} ${T.border} hover:opacity-70`}`}
-                    style={on ? { backgroundColor: accent } : undefined}>
-                    {m.emoji} {m.label}
+                  <button key={m.id} type="button" onClick={() => setMood(on ? null : m.id)}
+                    className="flex-1 flex flex-col items-center gap-1.5 group">
+                    <span
+                      className={`w-11 h-11 rounded-2xl flex items-center justify-center text-xl transition-all ${on ? "scale-105" : "opacity-55 group-hover:opacity-90"}`}
+                      style={{
+                        backgroundColor: on ? accent + "24" : (dark ? "#26272c" : "#eef0f3"),
+                        boxShadow: on ? `inset 0 0 0 2px ${accent}` : "none",
+                      }}>
+                      {m.emoji}
+                    </span>
+                    <span className={`text-[11px] font-medium ${on ? "" : T.sub}`}
+                      style={on ? { color: accent } : undefined}>{m.label}</span>
                   </button>
                 );
               })}
@@ -998,17 +1187,13 @@ function SettingsModal({ onClose }) {
 
 /* ---------- 프로필 뷰 ---------- */
 function ProfileView() {
-  const { T, accent, user, uname, entries, dark, setDark, openPhotoWall, openSettings, openEntry } = useDiary();
-  const scrapped = useMemo(
-    () => entries.filter((e) => e.scrapped).sort((a, b) => b.date.localeCompare(a.date)),
-    [entries]
-  );
+  const { T, accent, user, uname, entries, dark, setDark, openPhotoWall, openSettings } = useDiary();
   const stats = useMemo(() => ({
     logs: entries.length,
     tags: new Set(entries.flatMap((e) => extractTags(e.text))).size,
     months: new Set(entries.map((e) => e.date.slice(0, 7))).size,
-    scraps: scrapped.length,
-  }), [entries, scrapped]);
+    scraps: entries.filter((e) => e.scrapped).length,
+  }), [entries]);
 
   const Stat = ({ n, label }) => (
     <div className="text-center">
@@ -1060,29 +1245,41 @@ function ProfileView() {
           <span className={`text-xs ${T.sub}`}>테마 전환</span>
         </button>
       </div>
+    </div>
+  );
+}
 
-      {/* 스크랩 */}
-      <div>
-        <div className={`flex items-center gap-1.5 text-sm font-semibold ${T.text} mb-3`}>
-          <Bookmark size={16} style={{ fill: accent, color: accent }} /> 스크랩 ({scrapped.length})
-        </div>
-        {scrapped.length === 0 ? (
-          <div className={`text-center py-12 ${T.sub} text-sm ${T.card} border ${T.border} rounded-2xl`}>
-            <Bookmark size={32} className="mx-auto mb-2 opacity-40" />
-            일기의 북마크를 눌러 스크랩해보세요
-          </div>
-        ) : (
-          <div className="grid grid-cols-3 gap-[3px]">
-            {scrapped.map((e) => (
-              <button key={e.id} onClick={() => openEntry(e)} className="relative aspect-square rounded-lg overflow-hidden group">
-                <Img img={e.images[0]} />
-                <div className="absolute inset-0 bg-gradient-to-b from-black/40 via-transparent to-transparent" />
-                <span className="absolute top-1 left-1.5 text-[11px] font-bold text-white drop-shadow">{+e.date.slice(8)}</span>
-              </button>
-            ))}
-          </div>
-        )}
+/* ---------- 스크랩 뷰 (독립 탭) ---------- */
+function ScrapView() {
+  const { T, accent, entries, openEntry } = useDiary();
+  const scrapped = useMemo(
+    () => entries.filter((e) => e.scrapped).sort((a, b) => b.date.localeCompare(a.date)),
+    [entries]
+  );
+  return (
+    <div className="max-w-md mx-auto px-3 pt-6 pb-4">
+      <div className="px-1 mb-4 flex items-center gap-1.5">
+        <Bookmark size={18} style={{ fill: accent, color: accent }} />
+        <span className={`text-xl font-bold ${T.text}`}>스크랩</span>
+        <span className={`text-sm ${T.sub}`}>{scrapped.length}</span>
       </div>
+      {scrapped.length === 0 ? (
+        <div className={`text-center py-20 ${T.sub} text-sm`}>
+          <Bookmark size={36} className="mx-auto mb-3 opacity-40" />
+          일기의 북마크를 눌러 스크랩해보세요
+        </div>
+      ) : (
+        <div className="grid grid-cols-3 gap-[3px]">
+          {scrapped.map((e) => (
+            <button key={e.id} onClick={() => openEntry(e)} className="relative aspect-square rounded-lg overflow-hidden group">
+              <Img img={e.images[0]} />
+              <div className="absolute inset-0 bg-gradient-to-b from-black/40 via-transparent to-transparent" />
+              <span className="absolute top-1 left-1.5 text-[11px] font-bold text-white drop-shadow">{+e.date.slice(8)}</span>
+              {e.images.length > 1 && <Layers size={13} className="absolute top-1 right-1 text-white drop-shadow" />}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1102,8 +1299,8 @@ function BottomNav({ onWrite }) {
   return (
     <nav className={`fixed bottom-0 inset-x-0 ${T.card} border-t ${T.border} z-30`}>
       <div className="max-w-md mx-auto flex items-center">
-        <Item id="calendar" icon={CalendarIcon} />
-        <Item id="list" icon={LayoutGrid} />
+        <Item id="home" icon={CalendarIcon} />
+        <Item id="scrap" icon={Bookmark} />
         <button onClick={onWrite} className="flex-1 flex items-center justify-center py-2">
           <span className="w-12 h-12 rounded-full flex items-center justify-center shadow-lg hover:scale-105 transition-transform"
             style={{ backgroundColor: accent }}>
@@ -1169,7 +1366,7 @@ export default function LifeLogApp() {
   });
   const [user, setUser] = useState(undefined);
   const [entries, setEntries] = useState([]);
-  const [view, setView] = useState("calendar"); // calendar | list | report | profile
+  const [view, setView] = useState("home"); // home | scrap | report | profile
   const [month, setMonth] = useState(() => { const d = new Date(); return { y: d.getFullYear(), m: d.getMonth() }; });
   const [filter, setFilter] = useState({ mood: null, tag: null, query: "" });
   const [writeOpen, setWriteOpen] = useState(false);
@@ -1239,7 +1436,7 @@ export default function LifeLogApp() {
     openDay, openEntry, openSearch, openPhotoWall, openSettings,
   };
 
-  const showHeader = view === "calendar" || view === "list";
+  const showHeader = view === "home";
 
   return (
     <DiaryContext.Provider value={ctx}>
@@ -1248,15 +1445,12 @@ export default function LifeLogApp() {
           {showHeader && (
             <MonthHeader
               right={
-                <>
-                  <button onClick={() => setSearchOpen(true)} className={`p-2 rounded-full hover:bg-neutral-500/10 ${T.icon}`}><Search size={20} strokeWidth={1.9} /></button>
-                  <button onClick={() => setSettingsOpen(true)} className={`p-2 rounded-full hover:bg-neutral-500/10 ${T.icon}`}><Settings size={20} strokeWidth={1.8} /></button>
-                </>
+                <button onClick={() => setSearchOpen(true)} className={`p-2 rounded-full hover:bg-neutral-500/10 ${T.icon}`}><Search size={20} strokeWidth={1.9} /></button>
               }
             />
           )}
-          {view === "calendar" && <CalendarView />}
-          {view === "list" && <ListView />}
+          {view === "home" && <HomeView />}
+          {view === "scrap" && <ScrapView />}
           {view === "report" && <ReportView />}
           {view === "profile" && <ProfileView />}
         </main>
