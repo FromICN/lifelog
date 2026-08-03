@@ -10,6 +10,7 @@ import { auth, CONFIG_READY, signInWithGoogle, logOut } from "./firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import { subscribeLogs, createLog, updateLog, deleteLog, setScrap } from "./db";
 import { getPhotoURL, invalidatePhotoURL } from "./photos";
+import { loadThumb, peekThumbUrl } from "./thumbcache";
 import { importLegacyJSON, backfillPhotos } from "./migrate";
 
 /* ================================================================
@@ -206,35 +207,64 @@ const DiaryContext = createContext(null);
 const useDiary = () => useContext(DiaryContext);
 
 /* ---------- Storage 사진 (경로/URL → 표시) ----------
-   - thumb=true면 작은 썸네일(thumbURL/thumbPath) 우선 사용
-   - Firestore에 저장된 url/thumbURL이 있으면 getDownloadURL 왕복 없이 즉시 표시
+   - thumb=true이고 썸네일이 있으면: 로컬(IndexedDB) 캐시에서 먼저 로드
+     (한 번 본/올린 썸네일은 이후 네트워크 없이 디스크에서 즉시 표시)
+   - 캐시에 없으면 저장된 thumbURL(없으면 getDownloadURL)로 받아 로컬에 캐시
+   - 원본(본문) 이미지는 로컬에 저장하지 않고 Storage에서 로드
    - loading=lazy·decoding=async, 로딩 중 스켈레톤, 만료 URL은 자동 재조회 */
 function StoragePhoto({ img, thumb = false, className = "" }) {
+  const isPhoto = img.type === "photo";
+  const hasThumb = isPhoto && !!(img.thumbPath || img.thumbURL);
+  const useLocal = thumb && hasThumb && !img.preview;
+  const cacheKey = useLocal ? (img.thumbPath || img.thumbURL) : null;
+
   const directURL =
     img.preview || (thumb ? img.thumbURL || img.url : img.url) || null;
-  const path = (thumb ? img.thumbPath || img.path : img.path) || null;
+  const netPath = (thumb ? img.thumbPath || img.path : img.path) || null;
 
-  const [url, setUrl] = useState(directURL);
+  const [url, setUrl] = useState(() =>
+    useLocal ? peekThumbUrl(cacheKey) : directURL
+  );
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
-    setFailed(false);
-    if (directURL) { setUrl(directURL); return; }
-    if (!path) { setUrl(null); return; }
     let on = true;
+    setFailed(false);
+
+    if (img.preview) { setUrl(img.preview); return; }
+
+    if (useLocal) {
+      const mem = peekThumbUrl(cacheKey);
+      if (mem) { setUrl(mem); return; }
+      setUrl(null);
+      loadThumb(cacheKey, async () => {
+        const u = img.thumbURL || (await getPhotoURL(img.thumbPath || img.path));
+        const res = await fetch(u);
+        if (!res.ok) throw new Error("thumb fetch 실패");
+        return await res.blob();
+      })
+        .then((u) => { if (on) setUrl(u || directURL || null); })
+        .catch(() => { if (on) setUrl(directURL || null); });
+      return () => { on = false; };
+    }
+
+    if (directURL) { setUrl(directURL); return; }
+    if (!netPath) { setUrl(null); return; }
     setUrl(null);
-    getPhotoURL(path)
+    getPhotoURL(netPath)
       .then((u) => on && setUrl(u))
       .catch(() => on && setUrl(null));
     return () => { on = false; };
-  }, [directURL, path]);
+  }, [useLocal, cacheKey, directURL, netPath, img.preview]);
 
-  /* 저장된 URL이 만료/무효(예: 403)면 한 번 무효화 후 네트워크 재조회 */
+  /* 저장/캐시된 URL이 만료·무효면 한 번 무효화 후 네트워크 재조회 */
   const handleError = () => {
-    if (failed || !path) { setUrl(null); return; }
+    if (failed) { setUrl(null); return; }
     setFailed(true);
-    invalidatePhotoURL(path);
-    getPhotoURL(path).then(setUrl).catch(() => setUrl(null));
+    const p = img.thumbPath || img.path;
+    if (!p) { setUrl(null); return; }
+    invalidatePhotoURL(p);
+    getPhotoURL(p).then(setUrl).catch(() => setUrl(null));
   };
 
   if (!url)

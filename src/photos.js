@@ -12,6 +12,7 @@
    ================================================================ */
 import { ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 import { storage } from "./firebase";
+import { putThumb, dropThumb } from "./thumbcache";
 
 const FULL_EDGE = 1600;
 const FULL_MAX = 400 * 1024;
@@ -130,11 +131,13 @@ export async function uploadPhoto(uid, logId, index, fileOrBlob) {
   ]);
   primePhotoURL(path, url);
   primePhotoURL(thumbPath, thumbURL);
+  putThumb(thumbPath, thumbBlob); // 로컬 캐시에 즉시 저장 → 이 기기에서 바로 표시
   return { path, url, thumbPath, thumbURL };
 }
 
 /* 삭제 (없는 파일 등 오류는 무시) */
 export function deletePhoto(path) {
   invalidatePhotoURL(path);
+  dropThumb(path); // 썸네일 경로면 로컬 캐시도 정리
   return deleteObject(ref(storage, path)).catch(() => {});
 }

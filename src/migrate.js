@@ -12,6 +12,7 @@ import { ref, getDownloadURL, uploadBytes } from "firebase/storage";
 import { db, storage } from "./firebase";
 import { createLog } from "./db";
 import { compressThumb, thumbPathFor, primePhotoURL } from "./photos";
+import { putThumb } from "./thumbcache";
 
 const dataURLtoBlob = async (dataURL) => (await fetch(dataURL)).blob();
 
@@ -78,6 +79,7 @@ export async function backfillPhotos(uid, onProgress) {
         const thumbURL = await getDownloadURL(thumbRef);
         primePhotoURL(img.path, fullURL);
         primePhotoURL(thumbPath, thumbURL);
+        putThumb(thumbPath, thumbBlob); // 이 기기 로컬 캐시에도 저장
         next.push({ ...img, url: fullURL, thumbPath, thumbURL });
         changed = true;
       } catch (e) {
