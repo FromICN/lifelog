@@ -9,8 +9,8 @@ import {
 import { auth, CONFIG_READY, signInWithGoogle, logOut } from "./firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import { subscribeLogs, createLog, updateLog, deleteLog, setScrap } from "./db";
-import { getPhotoURL } from "./photos";
-import { importLegacyJSON } from "./migrate";
+import { getPhotoURL, invalidatePhotoURL } from "./photos";
+import { importLegacyJSON, backfillPhotos } from "./migrate";
 
 /* ================================================================
    LifeLog — "DayPic 스타일" 리디자인
@@ -205,30 +205,60 @@ const getPlaceFromFile = async (file) => {
 const DiaryContext = createContext(null);
 const useDiary = () => useContext(DiaryContext);
 
-/* ---------- Storage 사진 (경로 → URL 비동기 로드) ---------- */
-function StoragePhoto({ img, className = "" }) {
-  const [url, setUrl] = useState(img.preview || img.value || null);
+/* ---------- Storage 사진 (경로/URL → 표시) ----------
+   - thumb=true면 작은 썸네일(thumbURL/thumbPath) 우선 사용
+   - Firestore에 저장된 url/thumbURL이 있으면 getDownloadURL 왕복 없이 즉시 표시
+   - loading=lazy·decoding=async, 로딩 중 스켈레톤, 만료 URL은 자동 재조회 */
+function StoragePhoto({ img, thumb = false, className = "" }) {
+  const directURL =
+    img.preview || (thumb ? img.thumbURL || img.url : img.url) || null;
+  const path = (thumb ? img.thumbPath || img.path : img.path) || null;
+
+  const [url, setUrl] = useState(directURL);
+  const [failed, setFailed] = useState(false);
+
   useEffect(() => {
-    if (img.preview || img.value || !img.path) return;
+    setFailed(false);
+    if (directURL) { setUrl(directURL); return; }
+    if (!path) { setUrl(null); return; }
     let on = true;
-    getPhotoURL(img.path)
+    setUrl(null);
+    getPhotoURL(path)
       .then((u) => on && setUrl(u))
       .catch(() => on && setUrl(null));
     return () => { on = false; };
-  }, [img.path, img.preview, img.value]);
+  }, [directURL, path]);
+
+  /* 저장된 URL이 만료/무효(예: 403)면 한 번 무효화 후 네트워크 재조회 */
+  const handleError = () => {
+    if (failed || !path) { setUrl(null); return; }
+    setFailed(true);
+    invalidatePhotoURL(path);
+    getPhotoURL(path).then(setUrl).catch(() => setUrl(null));
+  };
+
   if (!url)
     return (
-      <div className={`w-full h-full flex items-center justify-center bg-neutral-500/10 ${className}`}>
-        <ImageIcon size={22} className="opacity-30" />
+      <div className={`w-full h-full flex items-center justify-center bg-neutral-500/10 animate-pulse ${className}`}>
+        <ImageIcon size={22} className="opacity-20" />
       </div>
     );
-  return <img src={url} alt="diary" className={`object-cover w-full h-full ${className}`} />;
+  return (
+    <img
+      src={url}
+      alt="diary"
+      loading="lazy"
+      decoding="async"
+      onError={handleError}
+      className={`object-cover w-full h-full ${className}`}
+    />
+  );
 }
 
 /* ---------- 공용: 이미지(사진 or 그라디언트) ---------- */
-function Img({ img, className = "" }) {
+function Img({ img, thumb = false, className = "" }) {
   if (!img) return <div className={`w-full h-full bg-neutral-500/10 ${className}`} />;
-  if (img.type === "photo") return <StoragePhoto img={img} className={className} />;
+  if (img.type === "photo") return <StoragePhoto img={img} thumb={thumb} className={className} />;
   return (
     <div className={`w-full h-full flex items-center justify-center ${img.value} ${className}`}>
       <span className="text-4xl drop-shadow">{img.label || "📷"}</span>
@@ -489,7 +519,7 @@ function CalendarView() {
             <button key={key} onClick={() => openDay(list)}
               className={`relative aspect-square rounded-lg overflow-hidden group ${isToday ? "ring-2" : ""}`}
               style={isToday ? { boxShadow: `0 0 0 2px ${accent}` } : undefined}>
-              <Img img={list[0].images[0]} />
+              <Img img={list[0].images[0]} thumb />
               <div className="absolute inset-0 bg-gradient-to-b from-black/45 via-transparent to-transparent" />
               <span className="absolute top-1 left-1.5 text-[11px] font-bold text-white drop-shadow">{day}</span>
               {(list.length > 1 || list[0].images.length > 1) && (
@@ -515,7 +545,7 @@ function GridView() {
     <div className="grid grid-cols-3 gap-[3px] px-3 mt-3">
       {sorted.map((e) => (
         <button key={e.id} onClick={() => openEntry(e)} className="relative aspect-square rounded-lg overflow-hidden group">
-          <Img img={e.images[0]} />
+          <Img img={e.images[0]} thumb />
           <div className="absolute inset-0 bg-gradient-to-b from-black/45 via-transparent to-transparent" />
           <span className="absolute top-1.5 left-2 text-xs font-bold text-white drop-shadow">{+e.date.slice(8)}</span>
           {e.images.length > 1 && <Layers size={14} className="absolute top-1.5 right-1.5 text-white drop-shadow" />}
@@ -768,7 +798,7 @@ function PhotoWallModal({ onClose }) {
             {photos.map(({ img, entry }, i) => (
               <button key={i} onClick={() => openEntry(entry)}
                 className="mb-1.5 w-full block rounded-lg overflow-hidden break-inside-avoid">
-                <div className="w-full"><Img img={img} className="!h-auto" /></div>
+                <div className="w-full"><Img img={img} thumb className="!h-auto" /></div>
               </button>
             ))}
           </div>
@@ -1084,6 +1114,21 @@ function SettingsModal({ onClose }) {
   const [importing, setImporting] = useState(false);
   const [importProgress, setImportProgress] = useState(null);
   const [importResult, setImportResult] = useState(null);
+  const [backfilling, setBackfilling] = useState(false);
+  const [backfillProgress, setBackfillProgress] = useState(null);
+  const [backfillResult, setBackfillResult] = useState(null);
+
+  const handleBackfill = async () => {
+    if (backfilling) return;
+    setBackfilling(true); setBackfillResult(null); setBackfillProgress(null);
+    try {
+      const n = await backfillPhotos(user.uid, (done, total) => setBackfillProgress({ done, total }));
+      setBackfillResult(n === 0 ? "✅ 이미 모두 최적화되어 있어요" : `✅ 사진 ${n}장 최적화 완료`);
+    } catch (e) {
+      console.error("최적화 실패:", e);
+      setBackfillResult(`최적화 실패: ${e.message}`);
+    } finally { setBackfilling(false); setBackfillProgress(null); }
+  };
 
   const Section = ({ title, children }) => (
     <div className={`border-b ${T.border} pb-5 mb-5 last:border-0 last:pb-0 last:mb-0`}>
@@ -1162,6 +1207,27 @@ function SettingsModal({ onClose }) {
                   {importResult.startsWith("✅") && <Check size={13} />}{importResult}
                 </div>
               )}
+
+              <div className={`pt-3 mt-1 border-t ${T.border} space-y-3`}>
+                <div>
+                  <div className={`text-sm ${T.text}`}>이미지 로딩 최적화</div>
+                  <div className={`text-xs ${T.sub}`}>
+                    기존 사진의 썸네일을 만들어 목록 로딩을 크게 빠르게 합니다. 사진이 많으면 시간이 걸릴 수 있어요. 1회만 실행하면 됩니다.
+                  </div>
+                </div>
+                <button onClick={handleBackfill} disabled={backfilling}
+                  className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium border ${T.border} ${T.text} disabled:opacity-40 hover:opacity-80`}>
+                  {backfilling ? <Loader2 size={15} className="animate-spin" /> : <ImageIcon size={15} />}
+                  {backfilling
+                    ? (backfillProgress ? `최적화 중... ${backfillProgress.done}/${backfillProgress.total}` : "최적화 중...")
+                    : "지금 최적화"}
+                </button>
+                {backfillResult && (
+                  <div className={`text-xs flex items-center gap-1 ${backfillResult.startsWith("✅") ? "text-emerald-600" : "text-red-500"}`}>
+                    {backfillResult.startsWith("✅") && <Check size={13} />}{backfillResult}
+                  </div>
+                )}
+              </div>
             </div>
           </Section>
 
@@ -1272,7 +1338,7 @@ function ScrapView() {
         <div className="grid grid-cols-3 gap-[3px]">
           {scrapped.map((e) => (
             <button key={e.id} onClick={() => openEntry(e)} className="relative aspect-square rounded-lg overflow-hidden group">
-              <Img img={e.images[0]} />
+              <Img img={e.images[0]} thumb />
               <div className="absolute inset-0 bg-gradient-to-b from-black/40 via-transparent to-transparent" />
               <span className="absolute top-1 left-1.5 text-[11px] font-bold text-white drop-shadow">{+e.date.slice(8)}</span>
               {e.images.length > 1 && <Layers size={13} className="absolute top-1 right-1 text-white drop-shadow" />}

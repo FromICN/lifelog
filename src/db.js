@@ -35,16 +35,25 @@ export function subscribeLogs(uid, onData, onError) {
   );
 }
 
+/* photo 이미지 항목을 문서 저장용 객체로 정규화 (undefined 필드는 제외) */
+const photoObj = (o) => {
+  const r = { type: "photo", path: o.path };
+  if (o.url) r.url = o.url;
+  if (o.thumbPath) r.thumbPath = o.thumbPath;
+  if (o.thumbURL) r.thumbURL = o.thumbURL;
+  return r;
+};
+
 /* 새 사진(file 보유)만 업로드하고 문서에 저장할 형태로 변환 */
 async function materializeImages(uid, logId, images) {
   const out = [];
   for (let i = 0; i < images.length; i++) {
     const img = images[i];
     if (img.type === "photo" && img.file) {
-      const path = await uploadPhoto(uid, logId, `${Date.now()}_${i}`, img.file);
-      out.push({ type: "photo", path });
+      const up = await uploadPhoto(uid, logId, `${Date.now()}_${i}`, img.file);
+      out.push(photoObj(up)); // { path, url, thumbPath, thumbURL }
     } else if (img.type === "photo") {
-      out.push({ type: "photo", path: img.path });
+      out.push(photoObj(img)); // 기존 사진: url/thumb 필드 보존
     } else {
       out.push({ type: "gradient", value: img.value, label: img.label || "📷" });
     }
@@ -52,8 +61,13 @@ async function materializeImages(uid, logId, images) {
   return out;
 }
 
-const photoPaths = (images = []) =>
-  images.filter((i) => i.type === "photo" && i.path).map((i) => i.path);
+/* 삭제 대상 Storage 경로(원본 + 썸네일) */
+const storagePathsOf = (images = []) =>
+  images
+    .filter((i) => i.type === "photo")
+    .flatMap((i) => [i.path, i.thumbPath])
+    .filter(Boolean);
+
 
 /* 생성 */
 export async function createLog(uid, data) {
@@ -76,8 +90,8 @@ export async function createLog(uid, data) {
 export async function updateLog(uid, prevImages, log) {
   const { id, createdAt, ...data } = log;
   const images = await materializeImages(uid, id, data.images || []);
-  const keep = new Set(photoPaths(images));
-  await Promise.all(photoPaths(prevImages).filter((p) => !keep.has(p)).map(deletePhoto));
+  const keep = new Set(storagePathsOf(images));
+  await Promise.all(storagePathsOf(prevImages).filter((p) => !keep.has(p)).map(deletePhoto));
   await updateDoc(doc(db, "users", uid, "logs", id), {
     date: data.date,
     mood: data.mood || null,
@@ -91,7 +105,7 @@ export async function updateLog(uid, prevImages, log) {
 
 /* 삭제 (사진도 함께 삭제) */
 export async function deleteLog(uid, log) {
-  await Promise.all(photoPaths(log.images).map(deletePhoto));
+  await Promise.all(storagePathsOf(log.images).map(deletePhoto));
   await deleteDoc(doc(db, "users", uid, "logs", log.id));
 }
 
