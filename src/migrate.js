@@ -10,7 +10,7 @@
 import { collection, getDocs, doc, updateDoc } from "firebase/firestore";
 import { db, getStorageLazy } from "./firebase";
 import { createLog } from "./db";
-import { compressThumb, thumbPathFor, primePhotoURL } from "./photos";
+import { compressThumb, compressMicro, thumbPathFor, primePhotoURL, IMG_CACHE_CONTROL } from "./photos";
 import { putThumb } from "./thumbcache";
 
 const dataURLtoBlob = async (dataURL) => (await fetch(dataURL)).blob();
@@ -43,10 +43,12 @@ export async function importLegacyJSON(uid, json, onProgress) {
 }
 
 /* ================================================================
-   기존 사진 백필: 썸네일 생성 + 다운로드 URL 채우기 (1회 실행)
-   - 대상: images[] 중 type=photo이고 thumbURL이 없는 항목
-   - 원본을 받아 400px 썸네일을 만들어 Storage에 올리고,
-     문서에 url/thumbPath/thumbURL을 채워 이후 접속 시 왕복을 없앰
+   기존 사진 백필: 썸네일 + 초소형 미리보기(micro) + URL 채우기 (1회 실행)
+   - 대상: images[] 중 type=photo이고 thumbURL 또는 micro가 없는 항목
+   - 썸네일이 없으면 원본을 받아 400px 썸네일을 만들어 Storage에 올리고,
+     micro가 없으면 (되도록 이미 있는 작은 썸네일에서) 32px 미리보기를 만들어
+     문서에 base64로 내장 → 접속 즉시 첫 렌더에 사진이 그려진다.
+   - 업로드에는 장기 불변 캐시 헤더를 붙여 재방문 로딩도 빨라진다.
    - 실패한 사진은 원본 그대로 두고 계속 진행
    ================================================================ */
 export async function backfillPhotos(uid, onProgress) {
@@ -54,7 +56,7 @@ export async function backfillPhotos(uid, onProgress) {
   const snap = await getDocs(collection(db, "users", uid, "logs"));
   const docs = snap.docs;
 
-  const needsWork = (img) => img.type === "photo" && img.path && !img.thumbURL;
+  const needsWork = (img) => img.type === "photo" && img.path && (!img.thumbURL || !img.micro);
   const total = docs.reduce(
     (n, d) => n + (d.data().images || []).filter(needsWork).length,
     0
@@ -63,6 +65,9 @@ export async function backfillPhotos(uid, onProgress) {
   onProgress?.(0, total);
   if (total === 0) return 0;
 
+  const meta = { contentType: "image/webp", cacheControl: IMG_CACHE_CONTROL };
+  const fetchBlob = async (url) => (await fetch(url)).blob();
+
   for (const d of docs) {
     const images = d.data().images || [];
     let changed = false;
@@ -70,20 +75,37 @@ export async function backfillPhotos(uid, onProgress) {
     for (const img of images) {
       if (!needsWork(img)) { next.push(img); continue; }
       try {
-        const fullURL = img.url || (await getDownloadURL(ref(storage, img.path)));
-        const blob = await (await fetch(fullURL)).blob();
-        const thumbBlob = await compressThumb(blob);
+        let { url: fullURL, thumbURL, micro } = img;
         const thumbPath = img.thumbPath || thumbPathFor(img.path);
-        const thumbRef = ref(storage, thumbPath);
-        await uploadBytes(thumbRef, thumbBlob, { contentType: "image/webp" });
-        const thumbURL = await getDownloadURL(thumbRef);
-        primePhotoURL(img.path, fullURL);
-        primePhotoURL(thumbPath, thumbURL);
-        putThumb(thumbPath, thumbBlob); // 이 기기 로컬 캐시에도 저장
-        next.push({ ...img, url: fullURL, thumbPath, thumbURL });
+        let thumbBlob = null;
+
+        // 1) 썸네일이 없으면 원본에서 생성해 업로드
+        if (!thumbURL) {
+          fullURL = fullURL || (await getDownloadURL(ref(storage, img.path)));
+          const blob = await fetchBlob(fullURL);
+          thumbBlob = await compressThumb(blob);
+          const thumbRef = ref(storage, thumbPath);
+          await uploadBytes(thumbRef, thumbBlob, meta);
+          thumbURL = await getDownloadURL(thumbRef);
+          primePhotoURL(img.path, fullURL);
+          primePhotoURL(thumbPath, thumbURL);
+          putThumb(thumbPath, thumbBlob); // 이 기기 로컬 캐시에도 저장
+        }
+
+        // 2) micro가 없으면 (가능하면 작은 썸네일에서) 32px 미리보기 생성
+        if (!micro) {
+          let srcBlob = thumbBlob;
+          if (!srcBlob) {
+            const u = thumbURL || fullURL || (await getDownloadURL(ref(storage, img.path)));
+            srcBlob = await fetchBlob(u);
+          }
+          micro = await compressMicro(srcBlob);
+        }
+
+        next.push({ ...img, url: fullURL || img.url, thumbPath, thumbURL, micro });
         changed = true;
       } catch (e) {
-        console.error("썸네일 백필 실패:", img.path, e);
+        console.error("사진 백필 실패:", img.path, e);
         next.push(img);
       } finally {
         onProgress?.(++done, total);

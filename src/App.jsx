@@ -271,6 +271,7 @@ function StoragePhoto({ img, thumb = false, className = "" }) {
     useLocal ? peekThumbUrl(cacheKey) : directURL
   );
   const [failed, setFailed] = useState(false);
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     let on = true;
@@ -302,6 +303,8 @@ function StoragePhoto({ img, thumb = false, className = "" }) {
     return () => { on = false; };
   }, [useLocal, cacheKey, directURL, netPath, img.preview]);
 
+  useEffect(() => { setLoaded(false); }, [url]);
+
   /* 저장/캐시된 URL이 만료·무효면 한 번 무효화 후 네트워크 재조회 */
   const handleError = () => {
     if (failed) { setUrl(null); return; }
@@ -311,6 +314,36 @@ function StoragePhoto({ img, thumb = false, className = "" }) {
     invalidatePhotoURL(p);
     getPhotoURL(p).then(setUrl).catch(() => setUrl(null));
   };
+
+  /* 문서에 내장된 초소형 미리보기(micro)는 추가 I/O 없이 첫 렌더에 즉시 그려진다.
+     PhotoWall의 자연 높이(h-auto) 레이아웃에는 절대배치 레이어를 쓰지 않는다. */
+  const micro = img.type === "photo" ? img.micro : null;
+  const naturalHeight = /h-auto/.test(className);
+
+  if (micro && !naturalHeight) {
+    return (
+      <div className="relative w-full h-full overflow-hidden">
+        <img
+          src={micro}
+          alt=""
+          aria-hidden="true"
+          className="absolute inset-0 w-full h-full object-cover"
+          style={{ filter: "blur(8px)", transform: "scale(1.08)" }}
+        />
+        {url && (
+          <img
+            src={url}
+            alt="diary"
+            loading="lazy"
+            decoding="async"
+            onError={handleError}
+            onLoad={() => setLoaded(true)}
+            className={`absolute inset-0 object-cover w-full h-full transition-opacity duration-300 ${loaded ? "opacity-100" : "opacity-0"} ${className}`}
+          />
+        )}
+      </div>
+    );
+  }
 
   if (!url)
     return (
@@ -1765,7 +1798,7 @@ function SettingsModal({ onClose }) {
                 <div>
                   <div className={`text-sm ${T.text}`}>이미지 로딩 최적화</div>
                   <div className={`text-xs ${T.sub}`}>
-                    기존 사진의 썸네일을 만들어 목록 로딩을 크게 빠르게 합니다. 사진이 많으면 시간이 걸릴 수 있어요. 1회만 실행하면 됩니다.
+                    기존 사진에 초소형 미리보기를 만들어 <b>접속하자마자 썸네일이 바로</b> 보이게 합니다. 새로 올리는 사진은 자동 적용돼요. 사진이 많으면 시간이 걸릴 수 있고, 1회만 실행하면 됩니다.
                   </div>
                 </div>
                 <button onClick={handleBackfill} disabled={backfilling}

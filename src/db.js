@@ -41,6 +41,7 @@ const photoObj = (o) => {
   if (o.url) r.url = o.url;
   if (o.thumbPath) r.thumbPath = o.thumbPath;
   if (o.thumbURL) r.thumbURL = o.thumbURL;
+  if (o.micro) r.micro = o.micro; // 문서 내장 초소형 미리보기(즉시 표시용)
   return r;
 };
 

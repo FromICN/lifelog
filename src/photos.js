@@ -21,6 +21,13 @@ const THUMB_EDGE = 400;
 const THUMB_MAX = 40 * 1024;
 const THUMB_STEPS = [0.7, 0.6, 0.5, 0.4];
 
+/* 초소형 미리보기(LQIP): 긴 변 32px. Firestore 문서에 base64로 직접 저장돼
+   접속 즉시(추가 네트워크·IndexedDB 없이) 첫 렌더에 그려진다. ~0.5KB 수준. */
+const MICRO_EDGE = 32;
+
+/* 재방문 시 브라우저/서비스워커 캐시에서 즉시 서빙되도록 장기 불변 캐시 */
+export const IMG_CACHE_CONTROL = "public, max-age=31536000, immutable";
+
 const canvasToBlob = (canvas, type, quality) =>
   new Promise((resolve) => canvas.toBlob(resolve, type, quality));
 
@@ -50,6 +57,22 @@ async function resizeToWebp(fileOrBlob, longEdge, targetMax, qualitySteps) {
 
 export const compressImage = (f) => resizeToWebp(f, FULL_EDGE, FULL_MAX, FULL_STEPS);
 export const compressThumb = (f) => resizeToWebp(f, THUMB_EDGE, THUMB_MAX, THUMB_STEPS);
+
+/* File/Blob → 32px 초소형 미리보기 dataURL (문서 내장용).
+   WebP 미지원 브라우저는 자동으로 png/jpeg dataURL을 돌려주지만
+   32px라 어느 쪽이든 1KB 안팎으로 매우 작다. */
+export async function compressMicro(fileOrBlob) {
+  const bitmap = await createImageBitmap(fileOrBlob, { imageOrientation: "from-image" });
+  const scale = Math.min(1, MICRO_EDGE / Math.max(bitmap.width, bitmap.height));
+  const w = Math.max(1, Math.round(bitmap.width * scale));
+  const h = Math.max(1, Math.round(bitmap.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  canvas.getContext("2d").drawImage(bitmap, 0, 0, w, h);
+  bitmap.close?.();
+  return canvas.toDataURL("image/webp", 0.5);
+}
 
 /* 원본 경로 → 썸네일 경로 (.webp 앞에 _thumb 삽입) */
 export const thumbPathFor = (path) =>
@@ -112,19 +135,21 @@ export function invalidatePhotoURL(path) {
 
 /* 압축(원본+썸네일) 후 업로드 → { path, url, thumbPath, thumbURL } */
 export async function uploadPhoto(uid, logId, index, fileOrBlob) {
-  const [fullBlob, thumbBlob] = await Promise.all([
+  const [fullBlob, thumbBlob, micro] = await Promise.all([
     compressImage(fileOrBlob),
     compressThumb(fileOrBlob),
+    compressMicro(fileOrBlob).catch(() => null), // 실패해도 업로드는 진행
   ]);
   const { ref, uploadBytes, getDownloadURL, storage } = await getStorageLazy();
   const path = `users/${uid}/photos/${logId}_${index}.webp`;
   const thumbPath = thumbPathFor(path);
   const fullRef = ref(storage, path);
   const thumbRef = ref(storage, thumbPath);
+  const meta = { contentType: "image/webp", cacheControl: IMG_CACHE_CONTROL };
 
   await Promise.all([
-    uploadBytes(fullRef, fullBlob, { contentType: "image/webp" }),
-    uploadBytes(thumbRef, thumbBlob, { contentType: "image/webp" }),
+    uploadBytes(fullRef, fullBlob, meta),
+    uploadBytes(thumbRef, thumbBlob, meta),
   ]);
   const [url, thumbURL] = await Promise.all([
     getDownloadURL(fullRef),
@@ -133,7 +158,7 @@ export async function uploadPhoto(uid, logId, index, fileOrBlob) {
   primePhotoURL(path, url);
   primePhotoURL(thumbPath, thumbURL);
   putThumb(thumbPath, thumbBlob); // 로컬 캐시에 즉시 저장 → 이 기기에서 바로 표시
-  return { path, url, thumbPath, thumbURL };
+  return { path, url, thumbPath, thumbURL, micro: micro || undefined };
 }
 
 /* 삭제 (없는 파일 등 오류는 무시) */
