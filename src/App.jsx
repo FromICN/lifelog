@@ -1030,69 +1030,232 @@ function SearchOverlay({ onClose }) {
   );
 }
 
-/* ---------- 작성 화면 공용: 섹션 래퍼 ---------- */
-function WriteSection({ icon: Icon, title, hint, accent, T, children }) {
+/* ---------- 작성 화면 공용: 섹션 제목 ---------- */
+function SectionTitle({ icon: Icon, title, accent, T }) {
   return (
-    <section className={`rounded-2xl border ${T.border} ${T.card} p-4 space-y-3`}>
-      <div className="flex items-center gap-2">
-        <span className="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
-          style={{ backgroundColor: accent + "1f", color: accent }}>
-          <Icon size={15} />
-        </span>
-        <div className="min-w-0">
-          <div className={`text-sm font-bold ${T.text}`}>{title}</div>
-          {hint && <div className={`text-[11px] ${T.sub}`}>{hint}</div>}
-        </div>
-      </div>
-      {children}
-    </section>
+    <div className="flex items-center gap-2">
+      <span className="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
+        style={{ backgroundColor: accent + "1f", color: accent }}>
+        <Icon size={15} />
+      </span>
+      <div className={`text-sm font-bold ${T.text}`}>{title}</div>
+    </div>
   );
 }
 
-/* ---------- 사진 간단 편집기 (회전·자르기·밝기/대비/채도) ---------- */
+/* ---------- 기분 이모지 선택 (안드로이드/시스템 기본 이모지 활용) ---------- */
+const EMOJI_GROUPS = [
+  { name: "표정", items: "😀 😃 😄 😁 😆 😅 😂 🙂 🙃 😉 😊 😇 🥰 😍 🤩 😘 😋 😛 😜 🤪 😌 😔 😪 🤤 😴".split(" ") },
+  { name: "감정", items: "🥲 😢 😭 😤 😠 😡 🤬 😳 🥺 😨 😰 😥 😓 😩 😫 😖 😣 😞 😟 🙁 😕 😲 🤯 😱 🥱".split(" ") },
+  { name: "상태", items: "🤗 🤭 🤫 🤔 🤨 😐 😑 😶 😏 😒 🙄 😬 😮‍💨 😷 🤒 🤕 🤧 🥵 🥶 🤢 🥳 🤠 😎 🤓 🧐".split(" ") },
+  { name: "하트·기호", items: "❤️ 🧡 💛 💚 💙 💜 🤍 🖤 💗 💖 💕 💞 💓 💔 ✨ ⭐ 🌟 🔥 💯 👍 👏 🙏 💪 🙌 🤝".split(" ") },
+  { name: "날씨·자연", items: "☀️ 🌤️ ⛅ ☁️ 🌧️ ⛈️ 🌩️ 🌨️ ❄️ ☃️ 🌈 🌙 ⭐ 🌊 🍀 🌸 🌷 🌻 🌼 🌱 🍁 🍂 🌿 💐 🌵".split(" ") },
+  { name: "활동·기타", items: "🏃 🚶 🧘 🛌 💤 ☕ 🍵 🍜 🍚 🍺 🍻 🍰 🎮 🎧 🎵 📚 ✏️ 💼 ✈️ 🏖️ 🚗 🎉 🎁 🏆 ⚽".split(" ") },
+];
+
+function EmojiPicker({ value, onPick, onClose, T, accent }) {
+  return (
+    <div className="fixed inset-0 z-[55] flex items-end sm:items-center justify-center" onClick={onClose}>
+      <div className="absolute inset-0 bg-black/40" />
+      <div onClick={(e) => e.stopPropagation()}
+        className={`relative w-full sm:max-w-md ${T.card} rounded-t-3xl sm:rounded-3xl border ${T.border} max-h-[70vh] flex flex-col`}>
+        <div className={`flex items-center justify-between px-4 py-3 border-b ${T.border}`}>
+          <span className={`text-sm font-semibold ${T.text}`}>기분 이모지 선택</span>
+          <div className="flex items-center gap-3">
+            {value && (
+              <button onClick={() => { onPick(null); onClose(); }}
+                className={`text-xs font-medium ${T.sub}`}>선택 해제</button>
+            )}
+            <button onClick={onClose} className={T.sub}><X size={20} /></button>
+          </div>
+        </div>
+        <div className="overflow-y-auto px-4 py-3 space-y-4">
+          {EMOJI_GROUPS.map((g) => (
+            <div key={g.name}>
+              <div className={`text-[11px] font-bold mb-1.5 ${T.sub}`}>{g.name}</div>
+              <div className="grid grid-cols-8 gap-1">
+                {g.items.map((em) => {
+                  const on = value === em;
+                  return (
+                    <button key={em} onClick={() => { onPick(em); onClose(); }}
+                      className="aspect-square rounded-lg flex items-center justify-center text-2xl"
+                      style={on ? { backgroundColor: accent + "24", boxShadow: `inset 0 0 0 2px ${accent}` } : undefined}>
+                      {em}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- 사진 편집기 (자유 크롭·회전·색감) ---------- */
+const ASPECTS = [
+  { id: "free", label: "자유", r: null },
+  { id: "1:1", label: "1:1", r: 1 },
+  { id: "4:3", label: "4:3", r: 4 / 3 },
+  { id: "3:4", label: "3:4", r: 3 / 4 },
+  { id: "16:9", label: "16:9", r: 16 / 9 },
+];
+const clamp01 = (v) => Math.max(0, Math.min(1, v));
+const MIN_CROP = 0.1;
+
 function PhotoEditor({ img, onCancel, onApply }) {
   const { T, accent } = useDiary();
-  const [srcUrl, setSrcUrl] = useState(img.preview || null);
-  const [rot, setRot] = useState(0);
+  const [baseUrl, setBaseUrl] = useState(null);   // 원본(objectURL/dataURL)
+  const [baseBlob, setBaseBlob] = useState(null);
+  const [rot, setRot] = useState(0);              // 0/90/180/270
+  const [workUrl, setWorkUrl] = useState(null);   // 회전 반영된 표시용
+  const [nat, setNat] = useState(null);           // {w,h} workUrl 원본 크기
+  const [crop, setCrop] = useState({ x: 0, y: 0, w: 1, h: 1 });
   const [bri, setBri] = useState(100);
   const [con, setCon] = useState(100);
   const [sat, setSat] = useState(100);
-  const [square, setSquare] = useState(false);
   const [busy, setBusy] = useState(false);
 
+  const stageRef = useRef(null);
+  const [stage, setStage] = useState({ w: 0, h: 0 });
+  const drag = useRef(null);
+
+  /* 원본 로드 */
   useEffect(() => {
-    if (img.preview) { setSrcUrl(img.preview); return; }
-    if (img.file) {
-      const u = URL.createObjectURL(img.file);
-      setSrcUrl(u);
-      return () => URL.revokeObjectURL(u);
-    }
+    let revoke = null;
+    (async () => {
+      let blob = img.file;
+      if (!blob && img.preview) blob = await (await fetch(img.preview)).blob();
+      setBaseBlob(blob);
+      const u = URL.createObjectURL(blob);
+      revoke = u;
+      setBaseUrl(u);
+    })();
+    return () => { if (revoke) URL.revokeObjectURL(revoke); };
   }, [img]);
 
+  /* 회전 반영된 workUrl 생성 (회전 0이면 원본 그대로) */
+  useEffect(() => {
+    if (!baseBlob || !baseUrl) return;
+    let alive = true;
+    let revoke = null;
+    (async () => {
+      if (rot === 0) { if (alive) setWorkUrl(baseUrl); }
+      else {
+        const bmp = await createImageBitmap(baseBlob, { imageOrientation: "from-image" });
+        const rotated = rot % 180 !== 0;
+        const c = document.createElement("canvas");
+        c.width = rotated ? bmp.height : bmp.width;
+        c.height = rotated ? bmp.width : bmp.height;
+        const ctx = c.getContext("2d");
+        ctx.translate(c.width / 2, c.height / 2);
+        ctx.rotate((rot * Math.PI) / 180);
+        ctx.drawImage(bmp, -bmp.width / 2, -bmp.height / 2);
+        bmp.close?.();
+        const b = await new Promise((res) => c.toBlob(res, "image/jpeg", 0.95));
+        const u = URL.createObjectURL(b);
+        revoke = u;
+        if (alive) setWorkUrl(u);
+      }
+      if (alive) setCrop({ x: 0, y: 0, w: 1, h: 1 });
+    })();
+    return () => { alive = false; if (revoke) URL.revokeObjectURL(revoke); };
+  }, [rot, baseBlob, baseUrl]);
+
+  /* workUrl 자연 크기 측정 */
+  useEffect(() => {
+    if (!workUrl) return;
+    const im = new Image();
+    im.onload = () => setNat({ w: im.naturalWidth, h: im.naturalHeight });
+    im.src = workUrl;
+  }, [workUrl]);
+
+  /* 스테이지 크기 추적 */
+  useEffect(() => {
+    if (!stageRef.current) return;
+    const el = stageRef.current;
+    const update = () => setStage({ w: el.clientWidth, h: el.clientHeight });
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [workUrl]);
+
+  /* 표시 이미지 사각형(스테이지 내 letterbox) */
+  const disp = useMemo(() => {
+    if (!nat || !stage.w || !stage.h) return null;
+    const scale = Math.min(stage.w / nat.w, stage.h / nat.h);
+    const w = nat.w * scale, h = nat.h * scale;
+    return { x: (stage.w - w) / 2, y: (stage.h - h) / 2, w, h };
+  }, [nat, stage]);
+
   const filterCss = `brightness(${bri}%) contrast(${con}%) saturate(${sat}%)`;
-  const changed = rot !== 0 || bri !== 100 || con !== 100 || sat !== 100 || square;
-  const reset = () => { setRot(0); setBri(100); setCon(100); setSat(100); setSquare(false); };
+
+  /* 종횡비 프리셋 → 중앙 정렬 크롭 박스 */
+  const applyAspect = (r) => {
+    if (!nat) return;
+    if (r == null) { setCrop({ x: 0, y: 0, w: 1, h: 1 }); return; }
+    // 목표 픽셀 비율 r = W/H. 정규화 좌표로 변환
+    let wN = 1, hN = 1;
+    // 이미지에 맞게 최대 크기로
+    const imgR = nat.w / nat.h;
+    if (r >= imgR) { wN = 1; hN = (nat.w / r) / nat.h; }
+    else { hN = 1; wN = (nat.h * r) / nat.w; }
+    setCrop({ x: (1 - wN) / 2, y: (1 - hN) / 2, w: wN, h: hN });
+  };
+
+  /* 포인터 → 정규화 좌표 */
+  const toNorm = (e) => {
+    const rect = stageRef.current.getBoundingClientRect();
+    const px = e.clientX - rect.left - (disp?.x || 0);
+    const py = e.clientY - rect.top - (disp?.y || 0);
+    return { nx: clamp01(px / (disp?.w || 1)), ny: clamp01(py / (disp?.h || 1)) };
+  };
+
+  const onDown = (mode) => (e) => {
+    e.preventDefault();
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    const { nx, ny } = toNorm(e);
+    drag.current = { mode, startNX: nx, startNY: ny, start: { ...crop } };
+  };
+  const onMove = (e) => {
+    if (!drag.current) return;
+    const { nx, ny } = toNorm(e);
+    const d = drag.current;
+    const dx = nx - d.startNX, dy = ny - d.startNY;
+    let { x, y, w, h } = d.start;
+    const m = d.mode;
+    if (m === "move") {
+      x = clamp01(x + dx > 0 ? Math.min(x + dx, 1 - w) : 0);
+      y = clamp01(y + dy > 0 ? Math.min(y + dy, 1 - h) : 0);
+    } else {
+      let x1 = x, y1 = y, x2 = x + w, y2 = y + h;
+      if (m.includes("w")) x1 = clamp01(Math.min(x + dx, x2 - MIN_CROP));
+      if (m.includes("e")) x2 = clamp01(Math.max(x + w + dx, x1 + MIN_CROP));
+      if (m.includes("n")) y1 = clamp01(Math.min(y + dy, y2 - MIN_CROP));
+      if (m.includes("s")) y2 = clamp01(Math.max(y + h + dy, y1 + MIN_CROP));
+      x = x1; y = y1; w = x2 - x1; h = y2 - y1;
+    }
+    setCrop({ x, y, w, h });
+  };
+  const onUp = () => { drag.current = null; };
 
   const apply = async () => {
     setBusy(true);
     try {
-      let blob = img.file;
-      if (!blob && img.preview) blob = await (await fetch(img.preview)).blob();
-      const bmp = await createImageBitmap(blob, { imageOrientation: "from-image" });
-      let sw = bmp.width, sh = bmp.height;
-      let sx = 0, sy = 0, cw = sw, ch = sh;
-      if (square) { const s = Math.min(sw, sh); sx = (sw - s) / 2; sy = (sh - s) / 2; cw = s; ch = s; }
-      const rotated = rot % 180 !== 0;
+      const src = workUrl;
+      const blob = await (await fetch(src)).blob();
+      const bmp = await createImageBitmap(blob);
+      const sx = Math.round(crop.x * bmp.width);
+      const sy = Math.round(crop.y * bmp.height);
+      const sw = Math.max(1, Math.round(crop.w * bmp.width));
+      const sh = Math.max(1, Math.round(crop.h * bmp.height));
       const canvas = document.createElement("canvas");
-      canvas.width = rotated ? ch : cw;
-      canvas.height = rotated ? cw : ch;
+      canvas.width = sw; canvas.height = sh;
       const ctx = canvas.getContext("2d");
       if ("filter" in ctx) ctx.filter = filterCss;
-      ctx.save();
-      ctx.translate(canvas.width / 2, canvas.height / 2);
-      ctx.rotate((rot * Math.PI) / 180);
-      ctx.drawImage(bmp, sx, sy, cw, ch, -cw / 2, -ch / 2, cw, ch);
-      ctx.restore();
+      ctx.drawImage(bmp, sx, sy, sw, sh, 0, 0, sw, sh);
       bmp.close?.();
       const out = await new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.92));
       if (!out) throw new Error("변환 실패");
@@ -1111,14 +1274,26 @@ function PhotoEditor({ img, onCancel, onApply }) {
   const Slider = ({ label, value, set, icon }) => (
     <label className="block">
       <div className={`flex items-center justify-between text-[11px] mb-1 ${T.sub}`}>
-        <span>{icon} {label}</span>
-        <span className="tabular-nums">{value}%</span>
+        <span>{icon} {label}</span><span className="tabular-nums">{value}%</span>
       </div>
       <input type="range" min={50} max={150} value={value}
-        onChange={(e) => set(+e.target.value)}
-        className="w-full" style={{ accentColor: accent }} />
+        onChange={(e) => set(+e.target.value)} className="w-full" style={{ accentColor: accent }} />
     </label>
   );
+
+  const Handle = ({ pos, style }) => (
+    <div onPointerDown={onDown(pos)} onPointerMove={onMove} onPointerUp={onUp}
+      className="absolute w-6 h-6 -m-3 touch-none" style={style}>
+      <div className="w-3.5 h-3.5 m-1.5 rounded-full bg-white border-2" style={{ borderColor: accent }} />
+    </div>
+  );
+
+  const box = disp && {
+    left: disp.x + crop.x * disp.w,
+    top: disp.y + crop.y * disp.h,
+    width: crop.w * disp.w,
+    height: crop.h * disp.h,
+  };
 
   return (
     <div className={`fixed inset-0 z-[60] ${T.bg} overflow-y-auto`}>
@@ -1127,45 +1302,70 @@ function PhotoEditor({ img, onCancel, onApply }) {
           <button onClick={onCancel} disabled={busy} className={`text-sm font-medium ${T.sub}`}>취소</button>
           <span className={`font-semibold text-sm ${T.text}`}>사진 편집</span>
           <button onClick={apply} disabled={busy}
-            className="flex items-center gap-1 font-semibold text-sm disabled:opacity-40"
-            style={{ color: accent }}>
+            className="flex items-center gap-1 font-semibold text-sm disabled:opacity-40" style={{ color: accent }}>
             {busy && <Loader2 size={14} className="animate-spin" />}{busy ? "적용 중" : "적용"}
           </button>
         </div>
       </div>
 
       <div className="max-w-md mx-auto p-4 space-y-4">
-        {/* 미리보기 */}
-        <div className={`rounded-2xl overflow-hidden ${T.input} flex items-center justify-center`}
-          style={{ aspectRatio: square ? "1 / 1" : "4 / 3" }}>
-          {srcUrl && (
-            <img src={srcUrl} alt="편집 미리보기"
-              className={square ? "w-full h-full object-cover" : "max-w-full max-h-full object-contain"}
-              style={{ filter: filterCss, transform: `rotate(${rot}deg)`, transition: "transform .2s" }} />
+        {/* 크롭 스테이지 */}
+        <div ref={stageRef} className="relative w-full bg-black/90 rounded-2xl overflow-hidden select-none"
+          style={{ height: "46vh" }}>
+          {workUrl && (
+            <img src={workUrl} alt="편집" draggable={false}
+              className="absolute inset-0 w-full h-full object-contain pointer-events-none"
+              style={{ filter: filterCss }} />
+          )}
+          {box && (
+            <>
+              {/* 바깥 어둡게 + 크롭 테두리 */}
+              <div onPointerDown={onDown("move")} onPointerMove={onMove} onPointerUp={onUp}
+                className="absolute touch-none"
+                style={{
+                  left: box.left, top: box.top, width: box.width, height: box.height,
+                  boxShadow: "0 0 0 9999px rgba(0,0,0,0.5)", outline: `1.5px solid ${accent}`,
+                }}>
+                {/* 3분할 안내선 */}
+                <div className="absolute inset-0 pointer-events-none">
+                  <div className="absolute top-1/3 inset-x-0 border-t border-white/30" />
+                  <div className="absolute top-2/3 inset-x-0 border-t border-white/30" />
+                  <div className="absolute left-1/3 inset-y-0 border-l border-white/30" />
+                  <div className="absolute left-2/3 inset-y-0 border-l border-white/30" />
+                </div>
+              </div>
+              <Handle pos="nw" style={{ left: box.left, top: box.top }} />
+              <Handle pos="ne" style={{ left: box.left + box.width, top: box.top }} />
+              <Handle pos="sw" style={{ left: box.left, top: box.top + box.height }} />
+              <Handle pos="se" style={{ left: box.left + box.width, top: box.top + box.height }} />
+            </>
           )}
         </div>
 
-        {/* 회전 · 자르기 */}
-        <div className="grid grid-cols-3 gap-2">
+        {/* 회전 · 종횡비 */}
+        <div className="flex items-center gap-2">
           <button onClick={() => setRot((r) => (r + 270) % 360)}
-            className={`flex flex-col items-center gap-1 py-2.5 rounded-xl ${T.input} ${T.text} text-xs`}>
-            <RotateCcw size={18} /> 왼쪽 회전
+            className={`flex items-center gap-1 px-3 py-2 rounded-xl ${T.input} ${T.text} text-xs`}>
+            <RotateCcw size={15} />
           </button>
           <button onClick={() => setRot((r) => (r + 90) % 360)}
-            className={`flex flex-col items-center gap-1 py-2.5 rounded-xl ${T.input} ${T.text} text-xs`}>
-            <RotateCw size={18} /> 오른쪽 회전
+            className={`flex items-center gap-1 px-3 py-2 rounded-xl ${T.input} ${T.text} text-xs`}>
+            <RotateCw size={15} />
           </button>
-          <button onClick={() => setSquare((s) => !s)}
-            className="flex flex-col items-center gap-1 py-2.5 rounded-xl text-xs"
-            style={square
-              ? { backgroundColor: accent + "24", color: accent, boxShadow: `inset 0 0 0 2px ${accent}` }
-              : undefined}>
-            <span className={square ? "" : T.text}><Crop size={18} /></span>
-            <span className={square ? "" : T.text}>1:1 정사각</span>
-          </button>
+          <div className="flex-1 flex gap-1.5 overflow-x-auto no-scrollbar">
+            {ASPECTS.map((a) => (
+              <button key={a.id} onClick={() => applyAspect(a.r)}
+                className={`flex-shrink-0 px-3 py-2 rounded-xl text-xs font-medium ${T.input} ${T.text}`}>
+                {a.label}
+              </button>
+            ))}
+          </div>
         </div>
+        <p className={`text-[11px] ${T.sub} flex items-center gap-1`}>
+          <Crop size={11} /> 모서리를 끌어 크기를 자유롭게 조정하고, 안쪽을 끌어 위치를 옮기세요
+        </p>
 
-        {/* 밝기 · 대비 · 채도 */}
+        {/* 색감 */}
         <div className={`rounded-2xl ${T.card} border ${T.border} p-4 space-y-3`}>
           <div className={`flex items-center gap-1.5 text-[11px] font-bold ${T.sub}`}>
             <SlidersHorizontal size={12} /> 색감 조정
@@ -1174,11 +1374,6 @@ function PhotoEditor({ img, onCancel, onApply }) {
           <Slider label="대비" value={con} set={setCon} icon="◑" />
           <Slider label="채도" value={sat} set={setSat} icon="🎨" />
         </div>
-
-        <button onClick={reset} disabled={!changed}
-          className={`w-full py-2.5 rounded-xl text-sm font-medium ${T.input} ${T.sub} disabled:opacity-40`}>
-          되돌리기
-        </button>
       </div>
     </div>
   );
@@ -1186,7 +1381,7 @@ function PhotoEditor({ img, onCancel, onApply }) {
 
 /* ---------- 작성 / 편집 전체 페이지 ---------- */
 function WritePage({ initial, onClose }) {
-  const { T, accent, dark, addEntry, updateEntry } = useDiary();
+  const { T, accent, addEntry, updateEntry } = useDiary();
   const editing = !!initial?.id;
   const [date, setDate] = useState(initial?.date || todayStr());
   const [text, setText] = useState(initial?.text || "");
@@ -1203,7 +1398,8 @@ function WritePage({ initial, onClose }) {
   const [autoFilled, setAutoFilled] = useState(false);
   const [locError, setLocError] = useState(null);
   const [locNote, setLocNote] = useState(null);
-  const [editIdx, setEditIdx] = useState(null); // 편집 중인 사진 index
+  const [editIdx, setEditIdx] = useState(null);
+  const [pickMood, setPickMood] = useState(false);
   const fileRef = useRef(null);
   const tags = extractTags(text);
 
@@ -1212,14 +1408,12 @@ function WritePage({ initial, onClose }) {
     regret.trim() || body.trim() || mind.trim() || mood;
 
   const fillCurrentLocation = async () => {
-    setLocError(null); setLocNote(null);
-    setLocating(true);
+    setLocError(null); setLocNote(null); setLocating(true);
     try { setLocation(await getCurrentPlace()); setAutoFilled(false); }
     catch (e) { setLocError(e.message); }
     finally { setLocating(false); }
   };
 
-  /* 사진 EXIF의 GPS로 장소 자동 채우기 (위치가 비어 있을 때만) */
   const tryAutoLocation = async (files) => {
     if (location.trim() || files.length === 0) return;
     setAutoLoc(true); setLocNote(null); setLocError(null);
@@ -1227,11 +1421,7 @@ function WritePage({ initial, onClose }) {
       let found = false;
       for (const f of files) {
         const place = await getPlaceFromFile(f).catch(() => null);
-        if (place) {
-          setLocation((cur) => (cur.trim() ? cur : place));
-          setAutoFilled(true); found = true;
-          break;
-        }
+        if (place) { setLocation((cur) => (cur.trim() ? cur : place)); setAutoFilled(true); found = true; break; }
       }
       if (!found) setLocNote("사진에 위치 정보가 없어요 · 아이콘을 눌러 현재 위치를 넣거나 직접 입력하세요");
     } finally { setAutoLoc(false); }
@@ -1275,37 +1465,38 @@ function WritePage({ initial, onClose }) {
           <button onClick={onClose} disabled={saving} className={T.sub}><X size={22} /></button>
           <span className={`font-semibold text-sm ${T.text}`}>{editing ? "일기 수정" : "새 일기"}</span>
           <button onClick={save} disabled={!hasContent || saving}
-            className="flex items-center gap-1 font-semibold text-sm disabled:opacity-40"
-            style={{ color: accent }}>
-            {saving && <Loader2 size={14} className="animate-spin" />}
-            {saving ? "저장 중" : "저장"}
+            className="flex items-center gap-1 font-semibold text-sm disabled:opacity-40" style={{ color: accent }}>
+            {saving && <Loader2 size={14} className="animate-spin" />}{saving ? "저장 중" : "저장"}
           </button>
         </div>
       </div>
 
       <div className="max-w-md mx-auto">
-        <div className="p-4 pb-16 space-y-4">
+        <div className="p-4 pb-16">
+          {/* 하나의 카드 안에 세 섹션 */}
+          <div className={`rounded-2xl border ${T.border} ${T.card} p-4 space-y-5`}>
 
-          {/* ===== 하이라이트 ===== */}
-          <WriteSection icon={Sparkles} title="하이라이트" hint="오늘을 대표하는 사진과 이야기" accent={accent} T={T}>
-            {/* 사진 (최대 5장) */}
-            <div>
-              <div className={`text-xs font-medium mb-2 ${T.sub}`}>사진 ({images.length}/5)</div>
-              <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1">
+            {/* ===== 하이라이트 ===== */}
+            <div className="space-y-3">
+              <SectionTitle icon={Sparkles} title="하이라이트" accent={accent} T={T} />
+
+              {/* 사진: 없으면 중앙 추가 버튼 / 있으면 가로 꽉 찬 이미지 */}
+              <div className="space-y-2">
                 {images.map((img, i) => {
                   const editable = !!(img.file || img.preview);
                   return (
-                    <div key={i} className="relative w-20 h-20 flex-shrink-0 rounded-xl overflow-hidden group">
-                      <Img img={img} />
+                    <div key={i} className="relative w-full rounded-xl overflow-hidden">
+                      {img.preview
+                        ? <img src={img.preview} alt="사진" className="w-full h-auto block" />
+                        : <div className="aspect-[4/3]"><Img img={img} /></div>}
                       <button onClick={() => setImages(images.filter((_, j) => j !== i))}
-                        className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 flex items-center justify-center">
-                        <X size={11} className="text-white" />
+                        className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/60 flex items-center justify-center">
+                        <X size={14} className="text-white" />
                       </button>
                       {editable && (
                         <button onClick={() => setEditIdx(i)}
-                          className="absolute bottom-1 right-1 w-5 h-5 rounded-full bg-black/60 flex items-center justify-center"
-                          title="사진 편집">
-                          <Pencil size={11} className="text-white" />
+                          className="absolute bottom-2 right-2 flex items-center gap-1 px-2.5 h-7 rounded-full bg-black/60 text-white text-xs">
+                          <Pencil size={12} /> 편집
                         </button>
                       )}
                     </div>
@@ -1313,116 +1504,120 @@ function WritePage({ initial, onClose }) {
                 })}
                 {images.length < 5 && (
                   <button onClick={() => fileRef.current?.click()}
-                    className={`w-20 h-20 flex-shrink-0 rounded-xl border-2 border-dashed ${T.border} flex flex-col items-center justify-center gap-1 ${T.sub} hover:opacity-70`}>
-                    <ImageIcon size={20} /><span className="text-[10px]">사진 추가</span>
+                    className={`w-full ${images.length === 0 ? "aspect-[16/10]" : "py-4"} rounded-xl border-2 border-dashed ${T.border} flex flex-col items-center justify-center gap-2 ${T.sub} hover:opacity-70`}>
+                    <ImageIcon size={images.length === 0 ? 30 : 22} />
+                    <span className="text-xs font-medium">사진 추가 ({images.length}/5)</span>
                   </button>
                 )}
+                <input ref={fileRef} type="file" accept="image/*" multiple className="hidden"
+                  onChange={(e) => { addPhotos(e.target.files); e.target.value = ""; }} />
               </div>
-              <input ref={fileRef} type="file" accept="image/*" multiple className="hidden"
-                onChange={(e) => { addPhotos(e.target.files); e.target.value = ""; }} />
-              <p className={`text-[11px] mt-1.5 ${T.sub}`}>사진을 추가한 뒤 <Pencil size={10} className="inline -mt-0.5" /> 아이콘으로 회전·자르기·색감을 편집할 수 있어요</p>
-            </div>
 
-            {/* 날짜 + 위치 */}
-            <div className="grid grid-cols-2 gap-3">
-              <label className="block">
-                <span className={`text-xs font-medium ${T.sub}`}>날짜</span>
-                <input type="date" value={date} max={todayStr()}
-                  onChange={(e) => setDate(e.target.value)}
-                  className={`mt-1 w-full ${T.input} rounded-xl px-3 py-2 text-sm outline-none ${T.text}`} />
-              </label>
-              <label className="block">
-                <span className={`text-xs font-medium ${T.sub}`}>위치</span>
-                <div className={`mt-1 flex items-center gap-1.5 ${T.input} rounded-xl px-3 py-2`}>
-                  <MapPin size={14} className={T.sub} />
-                  <input value={location}
-                    onChange={(e) => { setLocation(e.target.value); setAutoFilled(false); setLocNote(null); }}
-                    placeholder={autoLoc ? "사진 위치 확인 중…" : "장소 추가"}
-                    className={`flex-1 min-w-0 bg-transparent text-sm outline-none ${T.text}`} />
-                  <button type="button" onClick={fillCurrentLocation} disabled={locating}
-                    title="현재 위치 자동 입력" className="flex-shrink-0 disabled:opacity-50">
-                    <LocateFixed size={15} style={locating || autoLoc ? { color: accent } : undefined}
-                      className={locating || autoLoc ? "animate-pulse" : T.sub} />
-                  </button>
-                </div>
-              </label>
-            </div>
-            {autoFilled && !locError && (
-              <p className="text-xs flex items-center gap-1" style={{ color: accent }}>
-                <MapPin size={11} /> 사진의 위치 정보로 자동 입력했어요 · 필요하면 수정하세요
-              </p>
-            )}
-            {locNote && !locError && <p className={`text-xs ${T.sub}`}>{locNote}</p>}
-            {locError && <p className="text-xs text-red-500">{locError}</p>}
-
-            {/* 내용 */}
-            <div>
-              <span className={`text-xs font-medium ${T.sub}`}>내용</span>
-              <textarea value={text} onChange={(e) => setText(e.target.value)} rows={5}
-                placeholder={"오늘 하루는 어땠나요?\n#해시태그 를 붙이면 모아볼 수 있어요"}
-                className={`mt-1 ${inputCls}`} />
-              {tags.length > 0 && (
-                <div className="flex flex-wrap gap-1.5 mt-1.5">
-                  {tags.map((t) => (
-                    <span key={t} className="text-xs px-2 py-0.5 rounded-full font-medium"
-                      style={{ backgroundColor: accent + "1a", color: accent }}>#{t}</span>
-                  ))}
-                </div>
-              )}
-            </div>
-          </WriteSection>
-
-          {/* ===== 오늘의 배움 ===== */}
-          <WriteSection icon={BookOpen} title="오늘의 배움" hint="감사한 일과 아쉬운 일" accent={accent} T={T}>
-            <div>
-              <span className={`text-xs font-medium ${T.sub}`}>🙏 감사</span>
-              <textarea value={gratitude} onChange={(e) => setGratitude(e.target.value)} rows={2}
-                placeholder="오늘 감사했던 순간은?"
-                className={`mt-1 ${inputCls}`} />
-            </div>
-            <div>
-              <span className={`text-xs font-medium ${T.sub}`}>🌱 아쉬움</span>
-              <textarea value={regret} onChange={(e) => setRegret(e.target.value)} rows={2}
-                placeholder="다음엔 이렇게 해보고 싶어요"
-                className={`mt-1 ${inputCls}`} />
-            </div>
-          </WriteSection>
-
-          {/* ===== 오늘의 건강 ===== */}
-          <WriteSection icon={HeartPulse} title="오늘의 건강" hint="몸과 마음의 상태" accent={accent} T={T}>
-            {/* 마음 = 오늘의 기분(이모지 직접 선택) + 메모 */}
-            <div>
-              <span className={`text-xs font-medium ${T.sub} flex items-center gap-1`}><Smile size={12} /> 마음 · 오늘의 기분</span>
-              <div className="mt-1.5 grid grid-cols-6 gap-1.5">
-                {MOOD_EMOJIS.map((em) => {
-                  const on = mood === em;
-                  return (
-                    <button key={em} type="button" onClick={() => setMood(on ? null : em)}
-                      className="aspect-square rounded-xl flex items-center justify-center text-xl transition-all"
-                      style={{
-                        backgroundColor: on ? accent + "24" : (dark ? "#26272c" : "#eef0f3"),
-                        boxShadow: on ? `inset 0 0 0 2px ${accent}` : "none",
-                        transform: on ? "scale(1.05)" : "none",
-                      }}>
-                      {em}
+              {/* 날짜 + 위치 */}
+              <div className="grid grid-cols-2 gap-3">
+                <label className="block">
+                  <span className={`text-xs font-medium ${T.sub}`}>날짜</span>
+                  <input type="date" value={date} max={todayStr()}
+                    onChange={(e) => setDate(e.target.value)}
+                    className={`mt-1 w-full ${T.input} rounded-xl px-3 py-2 text-sm outline-none ${T.text}`} />
+                </label>
+                <label className="block">
+                  <span className={`text-xs font-medium ${T.sub}`}>위치</span>
+                  <div className={`mt-1 flex items-center gap-1.5 ${T.input} rounded-xl px-3 py-2`}>
+                    <MapPin size={14} className={T.sub} />
+                    <input value={location}
+                      onChange={(e) => { setLocation(e.target.value); setAutoFilled(false); setLocNote(null); }}
+                      placeholder={autoLoc ? "사진 위치 확인 중…" : "장소 추가"}
+                      className={`flex-1 min-w-0 bg-transparent text-sm outline-none ${T.text}`} />
+                    <button type="button" onClick={fillCurrentLocation} disabled={locating}
+                      title="현재 위치 자동 입력" className="flex-shrink-0 disabled:opacity-50">
+                      <LocateFixed size={15} style={locating || autoLoc ? { color: accent } : undefined}
+                        className={locating || autoLoc ? "animate-pulse" : T.sub} />
                     </button>
-                  );
-                })}
+                  </div>
+                </label>
               </div>
-              <textarea value={mind} onChange={(e) => setMind(e.target.value)} rows={2}
-                placeholder="마음은 어땠나요? (스트레스·설렘·평온 등)"
-                className={`mt-2 ${inputCls}`} />
+              {autoFilled && !locError && (
+                <p className="text-xs flex items-center gap-1" style={{ color: accent }}>
+                  <MapPin size={11} /> 사진의 위치 정보로 자동 입력했어요 · 필요하면 수정하세요
+                </p>
+              )}
+              {locNote && !locError && <p className={`text-xs ${T.sub}`}>{locNote}</p>}
+              {locError && <p className="text-xs text-red-500">{locError}</p>}
+
+              {/* 내용 */}
+              <div>
+                <span className={`text-xs font-medium ${T.sub}`}>내용</span>
+                <textarea value={text} onChange={(e) => setText(e.target.value)} rows={5}
+                  placeholder={"오늘 하루는 어땠나요?\n#해시태그 를 붙이면 모아볼 수 있어요"}
+                  className={`mt-1 ${inputCls}`} />
+                {tags.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 mt-1.5">
+                    {tags.map((t) => (
+                      <span key={t} className="text-xs px-2 py-0.5 rounded-full font-medium"
+                        style={{ backgroundColor: accent + "1a", color: accent }}>#{t}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
-            {/* 몸 */}
-            <div>
-              <span className={`text-xs font-medium ${T.sub}`}>💪 몸 · 컨디션</span>
-              <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={2}
-                placeholder="수면·운동·식사·컨디션 등"
-                className={`mt-1 ${inputCls}`} />
+
+            <div className={`border-t ${T.border}`} />
+
+            {/* ===== 오늘의 배움 ===== */}
+            <div className="space-y-3">
+              <SectionTitle icon={BookOpen} title="오늘의 배움" accent={accent} T={T} />
+              <div>
+                <span className={`text-xs font-medium ${T.sub}`}>감사</span>
+                <textarea value={gratitude} onChange={(e) => setGratitude(e.target.value)} rows={2}
+                  placeholder="오늘 감사했던 순간은?" className={`mt-1 ${inputCls}`} />
+              </div>
+              <div>
+                <span className={`text-xs font-medium ${T.sub}`}>아쉬움</span>
+                <textarea value={regret} onChange={(e) => setRegret(e.target.value)} rows={2}
+                  placeholder="다음엔 이렇게 해보고 싶어요" className={`mt-1 ${inputCls}`} />
+              </div>
             </div>
-          </WriteSection>
+
+            <div className={`border-t ${T.border}`} />
+
+            {/* ===== 오늘의 건강 ===== */}
+            <div className="space-y-3">
+              <SectionTitle icon={HeartPulse} title="오늘의 건강" accent={accent} T={T} />
+              {/* 마음: [+ 이모지] + 입력창 */}
+              <div>
+                <span className={`text-xs font-medium ${T.sub}`}>마음</span>
+                <div className="mt-1 flex items-stretch gap-2">
+                  <button type="button" onClick={() => setPickMood(true)}
+                    className="w-12 flex-shrink-0 rounded-xl flex items-center justify-center text-2xl"
+                    style={{
+                      backgroundColor: mood ? accent + "24" : (T.input.includes("#26272c") ? "#26272c" : "#eef0f3"),
+                      boxShadow: mood ? `inset 0 0 0 2px ${accent}` : "none",
+                    }}
+                    title="기분 이모지 선택">
+                    {mood ? mood : <Plus size={20} className={T.sub} />}
+                  </button>
+                  <input value={mind} onChange={(e) => setMind(e.target.value)}
+                    placeholder="마음은 어땠나요?"
+                    className={`flex-1 min-w-0 ${T.input} rounded-xl px-3 text-sm outline-none ${T.text}`} />
+                </div>
+              </div>
+              {/* 몸 */}
+              <div>
+                <span className={`text-xs font-medium ${T.sub}`}>몸</span>
+                <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={2}
+                  placeholder="수면·운동·식사·컨디션 등" className={`mt-1 ${inputCls}`} />
+              </div>
+            </div>
+
+          </div>
         </div>
       </div>
+
+      {/* 이모지 선택 */}
+      {pickMood && (
+        <EmojiPicker value={mood} onPick={setMood} onClose={() => setPickMood(false)} T={T} accent={accent} />
+      )}
 
       {/* 사진 편집기 */}
       {editIdx != null && images[editIdx] && (
