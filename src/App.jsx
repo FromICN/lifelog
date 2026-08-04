@@ -10,8 +10,10 @@ import { auth, CONFIG_READY, signInWithGoogle, logOut } from "./firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import { subscribeLogs, createLog, updateLog, deleteLog, setScrap } from "./db";
 import { getPhotoURL, invalidatePhotoURL } from "./photos";
-import { loadThumb, peekThumbUrl } from "./thumbcache";
-import { importLegacyJSON, backfillPhotos } from "./migrate";
+import { loadThumb, peekThumbUrl, warmThumbs } from "./thumbcache";
+/* migrate.js(백업 가져오기·사진 최적화)는 설정에서만 쓰므로 동적 import.
+   초기 번들에서 제외되어 첫 실행이 그만큼 빨라집니다. */
+const migrateMod = () => import("./migrate");
 
 /* ================================================================
    LifeLog — "DayPic 스타일" 리디자인
@@ -212,11 +214,19 @@ const useDiary = () => useContext(DiaryContext);
    - 캐시에 없으면 저장된 thumbURL(없으면 getDownloadURL)로 받아 로컬에 캐시
    - 원본(본문) 이미지는 로컬에 저장하지 않고 Storage에서 로드
    - loading=lazy·decoding=async, 로딩 중 스켈레톤, 만료 URL은 자동 재조회 */
+/* 썸네일 로컬 캐시 키 (warmThumbs와 StoragePhoto가 반드시 같은 키를 써야 함) */
+const thumbKeyOf = (img) =>
+  (img && img.type === "photo" && (img.thumbPath || img.thumbURL)) || null;
+
+/* 목록/캘린더에서 대표로 보여 주는 첫 사진의 썸네일 키들 */
+const listThumbKeys = (entries) =>
+  entries.map((e) => thumbKeyOf((e.images || [])[0])).filter(Boolean);
+
 function StoragePhoto({ img, thumb = false, className = "" }) {
   const isPhoto = img.type === "photo";
   const hasThumb = isPhoto && !!(img.thumbPath || img.thumbURL);
   const useLocal = thumb && hasThumb && !img.preview;
-  const cacheKey = useLocal ? (img.thumbPath || img.thumbURL) : null;
+  const cacheKey = useLocal ? thumbKeyOf(img) : null;
 
   const directURL =
     img.preview || (thumb ? img.thumbURL || img.url : img.url) || null;
@@ -811,6 +821,9 @@ function PhotoWallModal({ onClose }) {
     return out;
   }, [entries]);
 
+  /* 모아보기는 썸네일이 한꺼번에 많이 뜨므로 IndexedDB를 한 번에 읽어 둠 */
+  useEffect(() => { warmThumbs(photos.map(({ img }) => thumbKeyOf(img))); }, [photos]);
+
   return (
     <div className={`fixed inset-0 z-50 ${T.bg} overflow-y-auto`}>
       <div className={`sticky top-0 z-10 ${T.card} border-b ${T.border}`}>
@@ -1152,6 +1165,7 @@ function SettingsModal({ onClose }) {
     if (backfilling) return;
     setBackfilling(true); setBackfillResult(null); setBackfillProgress(null);
     try {
+      const { backfillPhotos } = await migrateMod();
       const n = await backfillPhotos(user.uid, (done, total) => setBackfillProgress({ done, total }));
       setBackfillResult(n === 0 ? "✅ 이미 모두 최적화되어 있어요" : `✅ 사진 ${n}장 최적화 완료`);
     } catch (e) {
@@ -1177,6 +1191,7 @@ function SettingsModal({ onClose }) {
         `${total}건의 일기를 가져옵니다. 같은 파일을 두 번 가져오면 중복 생성돼요. 계속할까요?`)) {
         setImporting(false); return;
       }
+      const { importLegacyJSON } = await migrateMod();
       const n = await importLegacyJSON(user.uid, json, (done, t) => setImportProgress({ done, total: t }));
       setImportResult(`✅ ${n}건 가져오기 완료`);
     } catch (e) {
@@ -1456,11 +1471,33 @@ function SetupNotice({ T }) {
 /* ================================================================
    App (루트)
    ================================================================ */
+
+/* 마지막으로 로그인했던 uid.
+   Firebase Auth의 첫 onAuthStateChanged는 저장된 세션을 읽고 필요하면
+   토큰을 갱신(securetoken.googleapis.com 왕복)하기 때문에 200~500ms가
+   걸립니다. 예전에는 이걸 다 기다린 뒤에야 Firestore 구독을 시작해서
+   그 시간만큼 화면이 스피너였습니다.
+   Firestore 영속 캐시는 토큰 없이도 로컬 데이터를 바로 내어 주므로,
+   마지막 uid를 기억해 두고 인증과 **병렬로** 구독을 시작합니다. */
+const LAST_UID_KEY = "lifelog-last-uid";
+const readBootUid = () => {
+  try { return localStorage.getItem(LAST_UID_KEY); } catch { return null; }
+};
+const writeBootUid = (uid) => {
+  try {
+    if (uid) localStorage.setItem(LAST_UID_KEY, uid);
+    else localStorage.removeItem(LAST_UID_KEY);
+  } catch { /* noop */ }
+};
+
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+
 export default function LifeLogApp() {
   const [dark, setDark] = useState(() => {
     try { return localStorage.getItem("lifelog-theme") === "dark"; } catch { return false; }
   });
   const [user, setUser] = useState(undefined);
+  const [bootUid] = useState(readBootUid); // 부팅 시점 1회만 읽음
   const [entries, setEntries] = useState([]);
   const [view, setView] = useState("home"); // home | scrap | report | profile
   const [month, setMonth] = useState(() => { const d = new Date(); return { y: d.getFullYear(), m: d.getMonth() }; });
@@ -1478,13 +1515,43 @@ export default function LifeLogApp() {
 
   useEffect(() => {
     if (!CONFIG_READY) return;
-    return onAuthStateChanged(auth, setUser);
+    return onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      writeBootUid(u ? u.uid : null);
+    });
   }, []);
 
+  /* 인증이 아직 안 끝났으면 마지막 uid로 먼저 붙는다(영속 캐시가 즉시 응답).
+     인증이 끝나 uid가 같으면 값이 안 바뀌므로 재구독도 없다. */
+  const activeUid = user === undefined ? bootUid : user?.uid || null;
+
   useEffect(() => {
-    if (!user) { setEntries([]); return; }
-    return subscribeLogs(user.uid, setEntries, (e) => console.error("동기화 오류:", e));
-  }, [user]);
+    if (!activeUid) { setEntries([]); return; }
+    let alive = true;
+    let first = true;
+
+    const unsub = subscribeLogs(
+      activeUid,
+      (list) => {
+        if (!alive) return;
+        const keys = listThumbKeys(list);
+        if (first) {
+          first = false;
+          /* 첫 스냅샷만: 썸네일을 IndexedDB에서 한 번에 읽어 두고 그린다.
+             → 사진이 스켈레톤 → 이미지로 깜빡이지 않고 처음부터 채워진 채 뜬다.
+             로컬 읽기가 느린 기기를 대비해 250ms 상한을 둔다. */
+          Promise.race([warmThumbs(keys), delay(250)]).then(() => {
+            if (alive) setEntries(list);
+          });
+        } else {
+          setEntries(list);
+          warmThumbs(keys);
+        }
+      },
+      (e) => console.error("동기화 오류:", e)
+    );
+    return () => { alive = false; unsub(); };
+  }, [activeUid]);
 
   /* 테마 토큰 — DayPic 스타일 클린 화이트 (라이트/다크) */
   const T = dark
@@ -1493,28 +1560,34 @@ export default function LifeLogApp() {
 
   const accent = accentOf(month.m);
 
-  if (!CONFIG_READY) return <SetupNotice T={T} />;
-  if (user === undefined)
-    return (
-      <div className={`min-h-screen ${T.bg} flex items-center justify-center`}>
-        <Loader2 size={28} className={`animate-spin ${T.sub}`} />
-      </div>
-    );
-  if (!user) return <LoginScreen T={T} />;
+  /* 인증 확인 전이라도 마지막 uid가 있으면 곧바로 앱 화면을 그린다.
+     (스피너 없이 캐시된 일기·사진이 즉시 보이는 구간) */
+  const account = user || (user === undefined && bootUid ? { uid: bootUid, email: null } : null);
 
-  const addEntry = (data) => createLog(user.uid, data);
+  if (!CONFIG_READY) return <SetupNotice T={T} />;
+  if (!account) {
+    if (user === undefined)
+      return (
+        <div className={`min-h-screen ${T.bg} flex items-center justify-center`}>
+          <Loader2 size={28} className={`animate-spin ${T.sub}`} />
+        </div>
+      );
+    return <LoginScreen T={T} />;
+  }
+
+  const addEntry = (data) => createLog(account.uid, data);
   const updateEntry = (entry) => {
     const prev = entries.find((e) => e.id === entry.id);
-    return updateLog(user.uid, prev?.images || [], entry);
+    return updateLog(account.uid, prev?.images || [], entry);
   };
   const deleteEntry = (id) => {
     const entry = entries.find((e) => e.id === id);
-    if (entry) deleteLog(user.uid, entry).catch((e) => console.error("삭제 실패:", e));
+    if (entry) deleteLog(account.uid, entry).catch((e) => console.error("삭제 실패:", e));
   };
   const openEdit = (entry) => { setDetail(null); setEditTarget(entry); setWriteOpen(true); };
   const toggleScrap = (id) => {
     const entry = entries.find((e) => e.id === id);
-    if (entry) setScrap(user.uid, id, !entry.scrapped).catch((e) => console.error("스크랩 실패:", e));
+    if (entry) setScrap(account.uid, id, !entry.scrapped).catch((e) => console.error("스크랩 실패:", e));
   };
   const openDay = (list) => setDetail({ mode: "day", key: list[0].date });
   const openEntry = (entry) => setDetail({ mode: "entry", key: entry.id });
@@ -1523,10 +1596,10 @@ export default function LifeLogApp() {
   const openSettings = () => setSettingsOpen(true);
 
   const monthEntries = entries.filter((e) => e.date.startsWith(`${month.y}-${pad2(month.m + 1)}`));
-  const uname = user.email ? user.email.split("@")[0] : "my.diary";
+  const uname = account.email ? account.email.split("@")[0] : "my.diary";
 
   const ctx = {
-    T, dark, setDark, accent, user, uname, entries, monthEntries, filter, setFilter,
+    T, dark, setDark, accent, user: account, uname, entries, monthEntries, filter, setFilter,
     view, setView, month, setMonth,
     addEntry, updateEntry, deleteEntry, openEdit, toggleScrap,
     openDay, openEntry, openSearch, openPhotoWall, openSettings,

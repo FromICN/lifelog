@@ -17,13 +17,44 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="apple-mobile-web-app-title" content="LifeLog" />
 
+    <!-- 앱이 켜지자마자 붙어야 하는 곳들: TLS 핸드셰이크를 미리 끝내 둔다.
+         (인증 토큰 갱신 · Firestore 동기화 · 사진 다운로드) -->
+    <link rel="preconnect" href="https://securetoken.googleapis.com" crossorigin />
+    <link rel="preconnect" href="https://firestore.googleapis.com" crossorigin />
+    <link rel="preconnect" href="https://firebasestorage.googleapis.com" crossorigin />
+    <link rel="dns-prefetch" href="https://identitytoolkit.googleapis.com" />
+
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <!-- Anton: 월 워드마크용 초고중량 콘덴스드 디스플레이 폰트 -->
+    <!-- Anton: 월 워드마크용 초고중량 콘덴스드 디스플레이 폰트.
+         외부 CSS를 <link rel="stylesheet">로 걸면 렌더링 차단이라
+         첫 화면이 폰트 서버 응답만큼 늦어집니다.
+         비차단으로 받아서 도착하는 대로 적용합니다. -->
     <link
-      rel="stylesheet"
+      rel="preload"
+      as="style"
       href="https://fonts.googleapis.com/css2?family=Anton&family=Newsreader:ital,wght@0,400;0,500;1,400;1,500&display=swap"
+      onload="this.onload=null;this.rel='stylesheet'"
     />
+    <noscript>
+      <link
+        rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Anton&family=Newsreader:ital,wght@0,400;0,500;1,400;1,500&display=swap"
+      />
+    </noscript>
+
+    <!-- JS 번들을 파싱하기 전에도 배경색이 먼저 칠해지도록 (흰 화면 방지).
+         저장된 테마를 즉시 반영해 다크모드에서 흰 번쩍임도 없앱니다. -->
+    <style>
+      html, body, #root { height: 100%; margin: 0; background: #f4f5f7; }
+      html.lifelog-dark, html.lifelog-dark body { background: #111214; }
+    </style>
+    <script>
+      try {
+        if (localStorage.getItem("lifelog-theme") === "dark")
+          document.documentElement.classList.add("lifelog-dark");
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

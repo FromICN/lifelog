@@ -10,8 +10,7 @@
      다운로드 URL(url/thumbURL)도 저장 → 접속 시 getDownloadURL 왕복 제거
    - path→URL 매핑은 localStorage에도 캐시(세션 간 유지)
    ================================================================ */
-import { ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
-import { storage } from "./firebase";
+import { getStorageLazy } from "./firebase";
 import { putThumb, dropThumb } from "./thumbcache";
 
 const FULL_EDGE = 1600;
@@ -97,7 +96,8 @@ export function getPhotoURL(path) {
     urlCache.set(path, p);
     return p;
   }
-  const p = getDownloadURL(ref(storage, path))
+  const p = getStorageLazy()
+    .then(({ ref, getDownloadURL, storage }) => getDownloadURL(ref(storage, path)))
     .then((u) => { lsSet(path, u); return u; })
     .catch((e) => { urlCache.delete(path); throw e; });
   urlCache.set(path, p);
@@ -116,6 +116,7 @@ export async function uploadPhoto(uid, logId, index, fileOrBlob) {
     compressImage(fileOrBlob),
     compressThumb(fileOrBlob),
   ]);
+  const { ref, uploadBytes, getDownloadURL, storage } = await getStorageLazy();
   const path = `users/${uid}/photos/${logId}_${index}.webp`;
   const thumbPath = thumbPathFor(path);
   const fullRef = ref(storage, path);
@@ -139,5 +140,7 @@ export async function uploadPhoto(uid, logId, index, fileOrBlob) {
 export function deletePhoto(path) {
   invalidatePhotoURL(path);
   dropThumb(path); // 썸네일 경로면 로컬 캐시도 정리
-  return deleteObject(ref(storage, path)).catch(() => {});
+  return getStorageLazy()
+    .then(({ ref, deleteObject, storage }) => deleteObject(ref(storage, path)))
+    .catch(() => {});
 }

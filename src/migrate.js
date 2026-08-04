@@ -8,8 +8,7 @@
    - 주의: 같은 파일을 두 번 가져오면 중복 생성됩니다 (1회만 실행)
    ================================================================ */
 import { collection, getDocs, doc, updateDoc } from "firebase/firestore";
-import { ref, getDownloadURL, uploadBytes } from "firebase/storage";
-import { db, storage } from "./firebase";
+import { db, getStorageLazy } from "./firebase";
 import { createLog } from "./db";
 import { compressThumb, thumbPathFor, primePhotoURL } from "./photos";
 import { putThumb } from "./thumbcache";
@@ -51,6 +50,7 @@ export async function importLegacyJSON(uid, json, onProgress) {
    - 실패한 사진은 원본 그대로 두고 계속 진행
    ================================================================ */
 export async function backfillPhotos(uid, onProgress) {
+  const { ref, getDownloadURL, uploadBytes, storage } = await getStorageLazy();
   const snap = await getDocs(collection(db, "users", uid, "logs"));
   const docs = snap.docs;
 
