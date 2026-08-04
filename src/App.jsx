@@ -3,8 +3,10 @@ import {
   Calendar as CalendarIcon, LayoutGrid, Plus, BarChart3, User,
   Search, Settings, X, ChevronLeft, ChevronRight, ChevronDown,
   MapPin, LocateFixed, Trash2, Pencil, Bookmark, MoreHorizontal,
-  Image as ImageIcon, Layers, Palette, Hash, Moon, Sun,
+  Image as ImageIcon, Layers, Hash, Moon, Sun,
   LogOut, Loader2, Check, UploadCloud, Rows,
+  RotateCcw, RotateCw, Crop, SlidersHorizontal,
+  Sparkles, BookOpen, HeartPulse, Smile,
 } from "lucide-react";
 import { auth, CONFIG_READY, signInWithGoogle, logOut } from "./firebase";
 import { onAuthStateChanged } from "firebase/auth";
@@ -31,23 +33,26 @@ const migrateMod = () => import("./migrate");
    ================================================================ */
 
 /* ---------- 상수 ---------- */
-const MOODS = [
-  { id: "sunny", label: "맑음", emoji: "☀️" },
-  { id: "cloudy", label: "흐림", emoji: "☁️" },
-  { id: "happy", label: "행복", emoji: "😊" },
-  { id: "calm", label: "차분", emoji: "😌" },
-  { id: "excited", label: "설렘", emoji: "💗" },
-  { id: "tired", label: "피곤", emoji: "😴" },
+/* 기분(마음)에 직접 고르는 이모지 팔레트.
+   저장은 이모지 문자 그대로. (예: "😊")  */
+const MOOD_EMOJIS = [
+  "😊", "😄", "🥰", "😍", "🤩", "😌",
+  "🙂", "😐", "😔", "😢", "😭", "😤",
+  "😡", "😰", "😱", "🥺", "😴", "🤒",
+  "🤕", "🥳", "🤗", "🤔", "😎", "😇",
+  "☀️", "⛅", "☁️", "🌧️", "❄️", "🌈",
+  "💗", "💪", "🔥", "✨", "🍀", "⭐",
 ];
 
-const GRADIENTS = [
-  "bg-gradient-to-br from-emerald-800 via-emerald-600 to-amber-100",
-  "bg-gradient-to-br from-stone-700 via-amber-600 to-amber-100",
-  "bg-gradient-to-br from-teal-700 via-stone-400 to-amber-50",
-  "bg-gradient-to-br from-lime-800 via-lime-700 to-stone-200",
-  "bg-gradient-to-br from-amber-800 via-amber-500 to-stone-100",
-  "bg-gradient-to-br from-neutral-700 via-neutral-400 to-stone-100",
-];
+/* 예전 버전에서 id로 저장된 기분과의 하위 호환 매핑 */
+const LEGACY_MOODS = {
+  sunny: { emoji: "☀️", label: "맑음" },
+  cloudy: { emoji: "☁️", label: "흐림" },
+  happy: { emoji: "😊", label: "행복" },
+  calm: { emoji: "😌", label: "차분" },
+  excited: { emoji: "💗", label: "설렘" },
+  tired: { emoji: "😴", label: "피곤" },
+};
 
 /* 월별 대문자 라벨 + 액센트 컬러 (DayPic 시그니처: 달마다 색이 바뀜) */
 const MONTHS_EN = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
@@ -72,7 +77,12 @@ const pad2 = (n) => String(n).padStart(2, "0");
 
 /* ---------- 유틸 ---------- */
 const extractTags = (text) => (text.match(/#[^\s#]+/g) || []).map((t) => t.slice(1));
-const moodOf = (id) => MOODS.find((m) => m.id === id);
+/* 저장된 mood(레거시 id 또는 이모지 문자) → { emoji, label } */
+const moodView = (m) => {
+  if (!m) return null;
+  if (LEGACY_MOODS[m]) return LEGACY_MOODS[m];
+  return { emoji: m, label: "" };
+};
 const fmtDate = (d) => {
   const [y, m, day] = d.split("-");
   return `${y}년 ${+m}월 ${+day}일`;
@@ -185,16 +195,41 @@ function parseExifGps(view) {
   return null;
 }
 
+/* 버퍼 어디에서든 "Exif\0\0" 시그니처를 찾아 그 뒤 TIFF 블록에서 GPS 추출.
+   HEIC(아이폰 기본 포맷)·JPEG 등 컨테이너가 달라도 EXIF의 TIFF 구조는 동일해서,
+   JPEG 마커 파싱이 실패할 때의 폴백으로 광범위하게 동작한다. */
+function scanExifGps(view) {
+  const len = view.byteLength;
+  // "Exif" = 0x45 0x78 0x69 0x66, 그 뒤 0x00 0x00
+  for (let i = 0; i + 8 < len; i++) {
+    if (
+      view.getUint8(i) === 0x45 && view.getUint8(i + 1) === 0x78 &&
+      view.getUint8(i + 2) === 0x69 && view.getUint8(i + 3) === 0x66 &&
+      view.getUint8(i + 4) === 0x00 && view.getUint8(i + 5) === 0x00
+    ) {
+      try {
+        const gps = parseTiffGps(view, i + 6);
+        if (gps) return gps;
+      } catch { /* 계속 탐색 */ }
+    }
+  }
+  return null;
+}
+
 const readExifGps = (file) =>
   new Promise((resolve) => {
-    if (!file || !/jpe?g/i.test(`${file.type || ""} ${file.name || ""}`)) return resolve(null);
+    if (!file) return resolve(null);
     const reader = new FileReader();
     reader.onload = (e) => {
-      try { resolve(parseExifGps(new DataView(e.target.result))); }
-      catch { resolve(null); }
+      try {
+        const view = new DataView(e.target.result);
+        // 1) 표준 JPEG APP1 경로  2) 실패 시 전체 스캔(HEIC 등)
+        resolve(parseExifGps(view) || scanExifGps(view));
+      } catch { resolve(null); }
     };
     reader.onerror = () => resolve(null);
-    reader.readAsArrayBuffer(file.slice(0, 256 * 1024)); // EXIF는 파일 앞부분에만 존재
+    // EXIF/GPS는 보통 파일 앞부분에 있지만 HEIC는 더 뒤쪽일 수 있어 넉넉히 읽는다.
+    reader.readAsArrayBuffer(file.slice(0, 1024 * 1024));
   });
 
 /* 사진 파일 → EXIF GPS → 장소명 (없으면 null) */
@@ -380,7 +415,7 @@ function DiaryCard({ entry }) {
   const { T, accent, uname, deleteEntry, openEdit, toggleScrap } = useDiary();
   const [menu, setMenu] = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
-  const mood = moodOf(entry.mood);
+  const mood = moodView(entry.mood);
 
   return (
     <article className={`${T.card} border ${T.border} rounded-2xl overflow-hidden`}>
@@ -393,7 +428,7 @@ function DiaryCard({ entry }) {
         <div className="flex-1 min-w-0">
           <div className={`text-sm font-semibold ${T.text} flex items-center gap-2`}>
             {fmtDate(entry.date)}
-            {mood && <span className={`text-xs font-normal ${T.sub}`}>{mood.emoji} {mood.label}</span>}
+            {mood && <span className={`text-xs font-normal ${T.sub}`}>{mood.emoji}{mood.label ? ` ${mood.label}` : ""}</span>}
           </div>
           <div className={`text-xs ${T.sub} flex items-center gap-1 truncate`}>
             {entry.location
@@ -434,13 +469,65 @@ function DiaryCard({ entry }) {
         </button>
       </div>
 
-      {/* 본문 */}
+      {/* 본문 (하이라이트 내용) */}
       {entry.text && (
-        <div className="px-4 pb-4 pt-2">
+        <div className="px-4 pb-1 pt-2">
           <RichText text={entry.text} />
         </div>
       )}
+
+      {/* 오늘의 배움 · 오늘의 건강 */}
+      <EntrySections entry={entry} />
+
+      <div className="pb-3" />
     </article>
+  );
+}
+
+/* 카드/상세에서 감사·아쉬움·몸·마음을 라벨과 함께 표시 (빈 항목은 생략) */
+function EntrySections({ entry }) {
+  const { T, accent } = useDiary();
+  const mood = moodView(entry.mood);
+  const learn = [
+    { key: "gratitude", label: "감사", icon: "🙏", text: entry.gratitude },
+    { key: "regret", label: "아쉬움", icon: "🌱", text: entry.regret },
+  ].filter((r) => r.text && r.text.trim());
+  const health = [
+    { key: "body", label: "몸", icon: "💪", text: entry.body },
+    { key: "mind", label: "마음", icon: mood?.emoji || "🧠", text: entry.mind },
+  ].filter((r) => r.text && r.text.trim());
+
+  if (learn.length === 0 && health.length === 0) return null;
+
+  const Row = ({ icon, label, text }) => (
+    <div className="flex gap-2">
+      <span className="text-sm leading-relaxed w-5 text-center flex-shrink-0">{icon}</span>
+      <div className="min-w-0">
+        <span className="text-[11px] font-semibold mr-1.5" style={{ color: accent }}>{label}</span>
+        <span className={`text-sm leading-relaxed whitespace-pre-wrap ${T.text}`}>{text}</span>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="px-4 pt-2 space-y-3">
+      {learn.length > 0 && (
+        <div className={`rounded-xl ${T.input} px-3 py-2.5 space-y-1.5`}>
+          <div className={`text-[11px] font-bold tracking-wide ${T.sub} flex items-center gap-1`}>
+            <BookOpen size={12} /> 오늘의 배움
+          </div>
+          {learn.map((r) => <Row key={r.key} {...r} />)}
+        </div>
+      )}
+      {health.length > 0 && (
+        <div className={`rounded-xl ${T.input} px-3 py-2.5 space-y-1.5`}>
+          <div className={`text-[11px] font-bold tracking-wide ${T.sub} flex items-center gap-1`}>
+            <HeartPulse size={12} /> 오늘의 건강
+          </div>
+          {health.map((r) => <Row key={r.key} {...r} />)}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -626,12 +713,17 @@ const HOME_TABS = [
   { id: "feed", icon: Rows, label: "피드" },
 ];
 function HomeView() {
-  const { T, accent } = useDiary();
+  const { T, accent, dark } = useDiary();
   const [tab, setTab] = useState("calendar"); // calendar | grid | feed
   return (
-    <div className="mt-4">
-      <div className="px-4 flex justify-center">
-        <div className={`inline-flex p-0.5 rounded-full ${T.input}`}>
+    <div className="mt-2">
+      {tab === "calendar" && <CalendarView />}
+      {tab === "grid" && <GridView />}
+      {tab === "feed" && <FeedView />}
+      {/* 캘린더·격자·피드 탭을 엄지가 닿기 쉬운 하단(전역 내비 바 위)에 띄운다 */}
+      <div className="fixed inset-x-0 bottom-[74px] z-30 flex justify-center pointer-events-none">
+        <div className="pointer-events-auto inline-flex p-0.5 rounded-full shadow-lg backdrop-blur"
+          style={{ backgroundColor: dark ? "rgba(38,39,44,0.92)" : "rgba(255,255,255,0.92)", boxShadow: "0 4px 16px rgba(0,0,0,0.18)" }}>
           {HOME_TABS.map(({ id, icon: Icon, label }) => {
             const on = tab === id;
             return (
@@ -644,10 +736,8 @@ function HomeView() {
           })}
         </div>
       </div>
-      {tab === "calendar" && <CalendarView />}
-      {tab === "grid" && <GridView />}
-      {tab === "feed" && <FeedView />}
-      <div className="h-2" />
+      {/* 떠 있는 탭에 콘텐츠가 가리지 않도록 하단 여백 */}
+      <div className="h-14" />
     </div>
   );
 }
@@ -720,7 +810,7 @@ function ReportView() {
     let arr = Object.entries(cnt).map(([w, v]) => ({ w, v }));
     if (arr.length === 0) {
       const mc = {};
-      yearEntries.forEach((e) => { const m = moodOf(e.mood); if (m) mc[m.label] = (mc[m.label] || 0) + 1; });
+      yearEntries.forEach((e) => { const m = moodView(e.mood); if (m) { const k = m.emoji; mc[k] = (mc[k] || 0) + 1; } });
       arr = Object.entries(mc).map(([w, v]) => ({ w, v }));
     }
     return arr.sort((a, b) => b.v - a.v).slice(0, 5);
@@ -873,6 +963,16 @@ function SearchOverlay({ onClose }) {
 
   const active = filter.query || filter.mood || filter.tag;
 
+  /* 실제로 쓰인 기분들만 칩으로 (자유 이모지 대응) */
+  const usedMoods = useMemo(() => {
+    const seen = new Map();
+    entries.forEach((e) => {
+      if (!e.mood || seen.has(e.mood)) return;
+      seen.set(e.mood, moodView(e.mood));
+    });
+    return [...seen.entries()].map(([id, v]) => ({ id, ...v }));
+  }, [entries]);
+
   return (
     <div className={`fixed inset-0 z-50 ${T.bg} overflow-y-auto`}>
       <div className={`sticky top-0 z-10 ${T.card} border-b ${T.border}`}>
@@ -896,14 +996,14 @@ function SearchOverlay({ onClose }) {
                 <Hash size={12} />{filter.tag}<X size={12} />
               </button>
             )}
-            {MOODS.map((m) => {
+            {usedMoods.map((m) => {
               const on = filter.mood === m.id;
               return (
                 <button key={m.id}
                   onClick={() => setFilter((f) => ({ ...f, mood: on ? null : m.id }))}
                   className={`flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${on ? "text-white border-transparent" : `${T.card} ${T.text} ${T.border} hover:opacity-70`}`}
                   style={on ? { backgroundColor: accent } : undefined}>
-                  {m.emoji} {m.label}
+                  {m.emoji}{m.label ? ` ${m.label}` : ""}
                 </button>
               );
             })}
@@ -930,6 +1030,160 @@ function SearchOverlay({ onClose }) {
   );
 }
 
+/* ---------- 작성 화면 공용: 섹션 래퍼 ---------- */
+function WriteSection({ icon: Icon, title, hint, accent, T, children }) {
+  return (
+    <section className={`rounded-2xl border ${T.border} ${T.card} p-4 space-y-3`}>
+      <div className="flex items-center gap-2">
+        <span className="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
+          style={{ backgroundColor: accent + "1f", color: accent }}>
+          <Icon size={15} />
+        </span>
+        <div className="min-w-0">
+          <div className={`text-sm font-bold ${T.text}`}>{title}</div>
+          {hint && <div className={`text-[11px] ${T.sub}`}>{hint}</div>}
+        </div>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+/* ---------- 사진 간단 편집기 (회전·자르기·밝기/대비/채도) ---------- */
+function PhotoEditor({ img, onCancel, onApply }) {
+  const { T, accent } = useDiary();
+  const [srcUrl, setSrcUrl] = useState(img.preview || null);
+  const [rot, setRot] = useState(0);
+  const [bri, setBri] = useState(100);
+  const [con, setCon] = useState(100);
+  const [sat, setSat] = useState(100);
+  const [square, setSquare] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (img.preview) { setSrcUrl(img.preview); return; }
+    if (img.file) {
+      const u = URL.createObjectURL(img.file);
+      setSrcUrl(u);
+      return () => URL.revokeObjectURL(u);
+    }
+  }, [img]);
+
+  const filterCss = `brightness(${bri}%) contrast(${con}%) saturate(${sat}%)`;
+  const changed = rot !== 0 || bri !== 100 || con !== 100 || sat !== 100 || square;
+  const reset = () => { setRot(0); setBri(100); setCon(100); setSat(100); setSquare(false); };
+
+  const apply = async () => {
+    setBusy(true);
+    try {
+      let blob = img.file;
+      if (!blob && img.preview) blob = await (await fetch(img.preview)).blob();
+      const bmp = await createImageBitmap(blob, { imageOrientation: "from-image" });
+      let sw = bmp.width, sh = bmp.height;
+      let sx = 0, sy = 0, cw = sw, ch = sh;
+      if (square) { const s = Math.min(sw, sh); sx = (sw - s) / 2; sy = (sh - s) / 2; cw = s; ch = s; }
+      const rotated = rot % 180 !== 0;
+      const canvas = document.createElement("canvas");
+      canvas.width = rotated ? ch : cw;
+      canvas.height = rotated ? cw : ch;
+      const ctx = canvas.getContext("2d");
+      if ("filter" in ctx) ctx.filter = filterCss;
+      ctx.save();
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      ctx.rotate((rot * Math.PI) / 180);
+      ctx.drawImage(bmp, sx, sy, cw, ch, -cw / 2, -ch / 2, cw, ch);
+      ctx.restore();
+      bmp.close?.();
+      const out = await new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.92));
+      if (!out) throw new Error("변환 실패");
+      const baseName = (img.file?.name || "photo").replace(/\.\w+$/, "");
+      const file = new File([out], `${baseName}_edited.jpg`, { type: "image/jpeg" });
+      const preview = await new Promise((res) => {
+        const r = new FileReader(); r.onload = (e) => res(e.target.result); r.readAsDataURL(out);
+      });
+      onApply({ type: "photo", preview, file });
+    } catch (e) {
+      console.error("편집 실패:", e);
+      alert("사진 편집에 실패했어요");
+    } finally { setBusy(false); }
+  };
+
+  const Slider = ({ label, value, set, icon }) => (
+    <label className="block">
+      <div className={`flex items-center justify-between text-[11px] mb-1 ${T.sub}`}>
+        <span>{icon} {label}</span>
+        <span className="tabular-nums">{value}%</span>
+      </div>
+      <input type="range" min={50} max={150} value={value}
+        onChange={(e) => set(+e.target.value)}
+        className="w-full" style={{ accentColor: accent }} />
+    </label>
+  );
+
+  return (
+    <div className={`fixed inset-0 z-[60] ${T.bg} overflow-y-auto`}>
+      <div className={`sticky top-0 z-10 ${T.card} border-b ${T.border}`}>
+        <div className="max-w-md mx-auto flex items-center justify-between px-4 py-3">
+          <button onClick={onCancel} disabled={busy} className={`text-sm font-medium ${T.sub}`}>취소</button>
+          <span className={`font-semibold text-sm ${T.text}`}>사진 편집</span>
+          <button onClick={apply} disabled={busy}
+            className="flex items-center gap-1 font-semibold text-sm disabled:opacity-40"
+            style={{ color: accent }}>
+            {busy && <Loader2 size={14} className="animate-spin" />}{busy ? "적용 중" : "적용"}
+          </button>
+        </div>
+      </div>
+
+      <div className="max-w-md mx-auto p-4 space-y-4">
+        {/* 미리보기 */}
+        <div className={`rounded-2xl overflow-hidden ${T.input} flex items-center justify-center`}
+          style={{ aspectRatio: square ? "1 / 1" : "4 / 3" }}>
+          {srcUrl && (
+            <img src={srcUrl} alt="편집 미리보기"
+              className={square ? "w-full h-full object-cover" : "max-w-full max-h-full object-contain"}
+              style={{ filter: filterCss, transform: `rotate(${rot}deg)`, transition: "transform .2s" }} />
+          )}
+        </div>
+
+        {/* 회전 · 자르기 */}
+        <div className="grid grid-cols-3 gap-2">
+          <button onClick={() => setRot((r) => (r + 270) % 360)}
+            className={`flex flex-col items-center gap-1 py-2.5 rounded-xl ${T.input} ${T.text} text-xs`}>
+            <RotateCcw size={18} /> 왼쪽 회전
+          </button>
+          <button onClick={() => setRot((r) => (r + 90) % 360)}
+            className={`flex flex-col items-center gap-1 py-2.5 rounded-xl ${T.input} ${T.text} text-xs`}>
+            <RotateCw size={18} /> 오른쪽 회전
+          </button>
+          <button onClick={() => setSquare((s) => !s)}
+            className="flex flex-col items-center gap-1 py-2.5 rounded-xl text-xs"
+            style={square
+              ? { backgroundColor: accent + "24", color: accent, boxShadow: `inset 0 0 0 2px ${accent}` }
+              : undefined}>
+            <span className={square ? "" : T.text}><Crop size={18} /></span>
+            <span className={square ? "" : T.text}>1:1 정사각</span>
+          </button>
+        </div>
+
+        {/* 밝기 · 대비 · 채도 */}
+        <div className={`rounded-2xl ${T.card} border ${T.border} p-4 space-y-3`}>
+          <div className={`flex items-center gap-1.5 text-[11px] font-bold ${T.sub}`}>
+            <SlidersHorizontal size={12} /> 색감 조정
+          </div>
+          <Slider label="밝기" value={bri} set={setBri} icon="☀️" />
+          <Slider label="대비" value={con} set={setCon} icon="◑" />
+          <Slider label="채도" value={sat} set={setSat} icon="🎨" />
+        </div>
+
+        <button onClick={reset} disabled={!changed}
+          className={`w-full py-2.5 rounded-xl text-sm font-medium ${T.input} ${T.sub} disabled:opacity-40`}>
+          되돌리기
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /* ---------- 작성 / 편집 전체 페이지 ---------- */
 function WritePage({ initial, onClose }) {
   const { T, accent, dark, addEntry, updateEntry } = useDiary();
@@ -939,16 +1193,26 @@ function WritePage({ initial, onClose }) {
   const [location, setLocation] = useState(initial?.location || "");
   const [mood, setMood] = useState(initial?.mood || null);
   const [images, setImages] = useState(initial?.images || []);
+  const [gratitude, setGratitude] = useState(initial?.gratitude || "");
+  const [regret, setRegret] = useState(initial?.regret || "");
+  const [body, setBody] = useState(initial?.body || "");
+  const [mind, setMind] = useState(initial?.mind || "");
   const [saving, setSaving] = useState(false);
   const [locating, setLocating] = useState(false);
   const [autoLoc, setAutoLoc] = useState(false);
   const [autoFilled, setAutoFilled] = useState(false);
   const [locError, setLocError] = useState(null);
+  const [locNote, setLocNote] = useState(null);
+  const [editIdx, setEditIdx] = useState(null); // 편집 중인 사진 index
   const fileRef = useRef(null);
   const tags = extractTags(text);
 
+  const hasContent =
+    text.trim() || images.length > 0 || gratitude.trim() ||
+    regret.trim() || body.trim() || mind.trim() || mood;
+
   const fillCurrentLocation = async () => {
-    setLocError(null);
+    setLocError(null); setLocNote(null);
     setLocating(true);
     try { setLocation(await getCurrentPlace()); setAutoFilled(false); }
     catch (e) { setLocError(e.message); }
@@ -957,17 +1221,19 @@ function WritePage({ initial, onClose }) {
 
   /* 사진 EXIF의 GPS로 장소 자동 채우기 (위치가 비어 있을 때만) */
   const tryAutoLocation = async (files) => {
-    if (location.trim()) return;
-    setAutoLoc(true);
+    if (location.trim() || files.length === 0) return;
+    setAutoLoc(true); setLocNote(null); setLocError(null);
     try {
+      let found = false;
       for (const f of files) {
         const place = await getPlaceFromFile(f).catch(() => null);
         if (place) {
           setLocation((cur) => (cur.trim() ? cur : place));
-          setAutoFilled(true);
+          setAutoFilled(true); found = true;
           break;
         }
       }
+      if (!found) setLocNote("사진에 위치 정보가 없어요 · 아이콘을 눌러 현재 위치를 넣거나 직접 입력하세요");
     } finally { setAutoLoc(false); }
   };
 
@@ -981,16 +1247,16 @@ function WritePage({ initial, onClose }) {
     });
     tryAutoLocation(arr.filter((f) => f instanceof Blob));
   };
-  const addGradient = () => {
-    if (images.length >= 5) return;
-    const g = GRADIENTS[Math.floor(Math.random() * GRADIENTS.length)];
-    setImages((imgs) => [...imgs, { type: "gradient", value: g, label: "📷" }]);
-  };
+
   const save = async () => {
-    if ((!text.trim() && images.length === 0) || saving) return;
+    if (!hasContent || saving) return;
     setSaving(true);
     try {
-      const data = { date, text: text.trim(), location: location.trim(), mood, images };
+      const data = {
+        date, text: text.trim(), location: location.trim(), mood, images,
+        gratitude: gratitude.trim(), regret: regret.trim(),
+        body: body.trim(), mind: mind.trim(),
+      };
       if (editing) await updateEntry({ ...initial, ...data });
       else await addEntry(data);
       onClose();
@@ -1000,14 +1266,15 @@ function WritePage({ initial, onClose }) {
     } finally { setSaving(false); }
   };
 
+  const inputCls = `w-full ${T.input} rounded-xl p-3 text-sm outline-none resize-none ${T.text}`;
+
   return (
     <div className={`fixed inset-0 z-50 ${T.bg} overflow-y-auto`}>
       <div className={`sticky top-0 z-10 ${T.card} border-b ${T.border}`}>
         <div className="max-w-md mx-auto flex items-center justify-between px-4 py-3">
           <button onClick={onClose} disabled={saving} className={T.sub}><X size={22} /></button>
           <span className={`font-semibold text-sm ${T.text}`}>{editing ? "일기 수정" : "새 일기"}</span>
-          <button onClick={save}
-            disabled={(!text.trim() && images.length === 0) || saving}
+          <button onClick={save} disabled={!hasContent || saving}
             className="flex items-center gap-1 font-semibold text-sm disabled:opacity-40"
             style={{ color: accent }}>
             {saving && <Loader2 size={14} className="animate-spin" />}
@@ -1018,110 +1285,156 @@ function WritePage({ initial, onClose }) {
 
       <div className="max-w-md mx-auto">
         <div className="p-4 pb-16 space-y-4">
-          {/* 사진 (최대 5장) */}
-          <div>
-            <div className={`text-xs font-medium mb-2 ${T.sub}`}>사진 ({images.length}/5)</div>
-            <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1">
-              {images.map((img, i) => (
-                <div key={i} className="relative w-20 h-20 flex-shrink-0 rounded-xl overflow-hidden">
-                  <Img img={img} />
-                  <button onClick={() => setImages(images.filter((_, j) => j !== i))}
-                    className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 flex items-center justify-center">
-                    <X size={11} className="text-white" />
-                  </button>
-                </div>
-              ))}
-              {images.length < 5 && (
-                <>
+
+          {/* ===== 하이라이트 ===== */}
+          <WriteSection icon={Sparkles} title="하이라이트" hint="오늘을 대표하는 사진과 이야기" accent={accent} T={T}>
+            {/* 사진 (최대 5장) */}
+            <div>
+              <div className={`text-xs font-medium mb-2 ${T.sub}`}>사진 ({images.length}/5)</div>
+              <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1">
+                {images.map((img, i) => {
+                  const editable = !!(img.file || img.preview);
+                  return (
+                    <div key={i} className="relative w-20 h-20 flex-shrink-0 rounded-xl overflow-hidden group">
+                      <Img img={img} />
+                      <button onClick={() => setImages(images.filter((_, j) => j !== i))}
+                        className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 flex items-center justify-center">
+                        <X size={11} className="text-white" />
+                      </button>
+                      {editable && (
+                        <button onClick={() => setEditIdx(i)}
+                          className="absolute bottom-1 right-1 w-5 h-5 rounded-full bg-black/60 flex items-center justify-center"
+                          title="사진 편집">
+                          <Pencil size={11} className="text-white" />
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+                {images.length < 5 && (
                   <button onClick={() => fileRef.current?.click()}
                     className={`w-20 h-20 flex-shrink-0 rounded-xl border-2 border-dashed ${T.border} flex flex-col items-center justify-center gap-1 ${T.sub} hover:opacity-70`}>
-                    <ImageIcon size={20} /><span className="text-[10px]">업로드</span>
+                    <ImageIcon size={20} /><span className="text-[10px]">사진 추가</span>
                   </button>
-                  <button onClick={addGradient}
-                    className={`w-20 h-20 flex-shrink-0 rounded-xl border-2 border-dashed ${T.border} flex flex-col items-center justify-center gap-1 ${T.sub} hover:opacity-70`}>
-                    <Palette size={20} /><span className="text-[10px]">색상 카드</span>
+                )}
+              </div>
+              <input ref={fileRef} type="file" accept="image/*" multiple className="hidden"
+                onChange={(e) => { addPhotos(e.target.files); e.target.value = ""; }} />
+              <p className={`text-[11px] mt-1.5 ${T.sub}`}>사진을 추가한 뒤 <Pencil size={10} className="inline -mt-0.5" /> 아이콘으로 회전·자르기·색감을 편집할 수 있어요</p>
+            </div>
+
+            {/* 날짜 + 위치 */}
+            <div className="grid grid-cols-2 gap-3">
+              <label className="block">
+                <span className={`text-xs font-medium ${T.sub}`}>날짜</span>
+                <input type="date" value={date} max={todayStr()}
+                  onChange={(e) => setDate(e.target.value)}
+                  className={`mt-1 w-full ${T.input} rounded-xl px-3 py-2 text-sm outline-none ${T.text}`} />
+              </label>
+              <label className="block">
+                <span className={`text-xs font-medium ${T.sub}`}>위치</span>
+                <div className={`mt-1 flex items-center gap-1.5 ${T.input} rounded-xl px-3 py-2`}>
+                  <MapPin size={14} className={T.sub} />
+                  <input value={location}
+                    onChange={(e) => { setLocation(e.target.value); setAutoFilled(false); setLocNote(null); }}
+                    placeholder={autoLoc ? "사진 위치 확인 중…" : "장소 추가"}
+                    className={`flex-1 min-w-0 bg-transparent text-sm outline-none ${T.text}`} />
+                  <button type="button" onClick={fillCurrentLocation} disabled={locating}
+                    title="현재 위치 자동 입력" className="flex-shrink-0 disabled:opacity-50">
+                    <LocateFixed size={15} style={locating || autoLoc ? { color: accent } : undefined}
+                      className={locating || autoLoc ? "animate-pulse" : T.sub} />
                   </button>
-                </>
+                </div>
+              </label>
+            </div>
+            {autoFilled && !locError && (
+              <p className="text-xs flex items-center gap-1" style={{ color: accent }}>
+                <MapPin size={11} /> 사진의 위치 정보로 자동 입력했어요 · 필요하면 수정하세요
+              </p>
+            )}
+            {locNote && !locError && <p className={`text-xs ${T.sub}`}>{locNote}</p>}
+            {locError && <p className="text-xs text-red-500">{locError}</p>}
+
+            {/* 내용 */}
+            <div>
+              <span className={`text-xs font-medium ${T.sub}`}>내용</span>
+              <textarea value={text} onChange={(e) => setText(e.target.value)} rows={5}
+                placeholder={"오늘 하루는 어땠나요?\n#해시태그 를 붙이면 모아볼 수 있어요"}
+                className={`mt-1 ${inputCls}`} />
+              {tags.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mt-1.5">
+                  {tags.map((t) => (
+                    <span key={t} className="text-xs px-2 py-0.5 rounded-full font-medium"
+                      style={{ backgroundColor: accent + "1a", color: accent }}>#{t}</span>
+                  ))}
+                </div>
               )}
             </div>
-            <input ref={fileRef} type="file" accept="image/*" multiple className="hidden"
-              onChange={(e) => { addPhotos(e.target.files); e.target.value = ""; }} />
-          </div>
+          </WriteSection>
 
-          {/* 본문 */}
-          <textarea
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            rows={5}
-            placeholder={"오늘 하루는 어땠나요?\n#해시태그 를 붙이면 모아볼 수 있어요"}
-            className={`w-full ${T.input} rounded-xl p-3 text-sm outline-none resize-none ${T.text}`}
-          />
-          {tags.length > 0 && (
-            <div className="flex flex-wrap gap-1.5 -mt-2">
-              {tags.map((t) => (
-                <span key={t} className="text-xs px-2 py-0.5 rounded-full font-medium"
-                  style={{ backgroundColor: accent + "1a", color: accent }}>#{t}</span>
-              ))}
+          {/* ===== 오늘의 배움 ===== */}
+          <WriteSection icon={BookOpen} title="오늘의 배움" hint="감사한 일과 아쉬운 일" accent={accent} T={T}>
+            <div>
+              <span className={`text-xs font-medium ${T.sub}`}>🙏 감사</span>
+              <textarea value={gratitude} onChange={(e) => setGratitude(e.target.value)} rows={2}
+                placeholder="오늘 감사했던 순간은?"
+                className={`mt-1 ${inputCls}`} />
             </div>
-          )}
+            <div>
+              <span className={`text-xs font-medium ${T.sub}`}>🌱 아쉬움</span>
+              <textarea value={regret} onChange={(e) => setRegret(e.target.value)} rows={2}
+                placeholder="다음엔 이렇게 해보고 싶어요"
+                className={`mt-1 ${inputCls}`} />
+            </div>
+          </WriteSection>
 
-          {/* 날짜 + 위치 */}
-          <div className="grid grid-cols-2 gap-3">
-            <label className="block">
-              <span className={`text-xs font-medium ${T.sub}`}>날짜</span>
-              <input type="date" value={date} max={todayStr()}
-                onChange={(e) => setDate(e.target.value)}
-                className={`mt-1 w-full ${T.input} rounded-xl px-3 py-2 text-sm outline-none ${T.text}`} />
-            </label>
-            <label className="block">
-              <span className={`text-xs font-medium ${T.sub}`}>위치</span>
-              <div className={`mt-1 flex items-center gap-1.5 ${T.input} rounded-xl px-3 py-2`}>
-                <MapPin size={14} className={T.sub} />
-                <input value={location}
-                  onChange={(e) => { setLocation(e.target.value); setAutoFilled(false); }}
-                  placeholder={autoLoc ? "사진 위치 확인 중…" : "장소 추가"}
-                  className={`flex-1 min-w-0 bg-transparent text-sm outline-none ${T.text}`} />
-                <button type="button" onClick={fillCurrentLocation} disabled={locating}
-                  title="현재 위치 자동 입력" className="flex-shrink-0 disabled:opacity-50">
-                  <LocateFixed size={15} style={locating || autoLoc ? { color: accent } : undefined}
-                    className={locating || autoLoc ? "animate-pulse" : T.sub} />
-                </button>
-              </div>
-            </label>
-          </div>
-          {autoFilled && !locError && (
-            <p className="text-xs -mt-2 flex items-center gap-1" style={{ color: accent }}>
-              <MapPin size={11} /> 사진의 위치 정보로 자동 입력했어요 · 필요하면 수정하세요
-            </p>
-          )}
-          {locError && <p className="text-xs text-red-500 -mt-2">{locError}</p>}
-
-          {/* 오늘의 기분 */}
-          <div>
-            <div className={`text-xs font-medium mb-2 ${T.sub}`}>오늘의 기분</div>
-            <div className="flex gap-1.5">
-              {MOODS.map((m) => {
-                const on = mood === m.id;
-                return (
-                  <button key={m.id} type="button" onClick={() => setMood(on ? null : m.id)}
-                    className="flex-1 flex flex-col items-center gap-1.5 group">
-                    <span
-                      className={`w-11 h-11 rounded-2xl flex items-center justify-center text-xl transition-all ${on ? "scale-105" : "opacity-55 group-hover:opacity-90"}`}
+          {/* ===== 오늘의 건강 ===== */}
+          <WriteSection icon={HeartPulse} title="오늘의 건강" hint="몸과 마음의 상태" accent={accent} T={T}>
+            {/* 마음 = 오늘의 기분(이모지 직접 선택) + 메모 */}
+            <div>
+              <span className={`text-xs font-medium ${T.sub} flex items-center gap-1`}><Smile size={12} /> 마음 · 오늘의 기분</span>
+              <div className="mt-1.5 grid grid-cols-6 gap-1.5">
+                {MOOD_EMOJIS.map((em) => {
+                  const on = mood === em;
+                  return (
+                    <button key={em} type="button" onClick={() => setMood(on ? null : em)}
+                      className="aspect-square rounded-xl flex items-center justify-center text-xl transition-all"
                       style={{
                         backgroundColor: on ? accent + "24" : (dark ? "#26272c" : "#eef0f3"),
                         boxShadow: on ? `inset 0 0 0 2px ${accent}` : "none",
+                        transform: on ? "scale(1.05)" : "none",
                       }}>
-                      {m.emoji}
-                    </span>
-                    <span className={`text-[11px] font-medium ${on ? "" : T.sub}`}
-                      style={on ? { color: accent } : undefined}>{m.label}</span>
-                  </button>
-                );
-              })}
+                      {em}
+                    </button>
+                  );
+                })}
+              </div>
+              <textarea value={mind} onChange={(e) => setMind(e.target.value)} rows={2}
+                placeholder="마음은 어땠나요? (스트레스·설렘·평온 등)"
+                className={`mt-2 ${inputCls}`} />
             </div>
-          </div>
+            {/* 몸 */}
+            <div>
+              <span className={`text-xs font-medium ${T.sub}`}>💪 몸 · 컨디션</span>
+              <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={2}
+                placeholder="수면·운동·식사·컨디션 등"
+                className={`mt-1 ${inputCls}`} />
+            </div>
+          </WriteSection>
         </div>
       </div>
+
+      {/* 사진 편집기 */}
+      {editIdx != null && images[editIdx] && (
+        <PhotoEditor
+          img={images[editIdx]}
+          onCancel={() => setEditIdx(null)}
+          onApply={(newImg) => {
+            setImages((imgs) => imgs.map((im, j) => (j === editIdx ? newImg : im)));
+            setEditIdx(null);
+          }}
+        />
+      )}
     </div>
   );
 }
