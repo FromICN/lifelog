@@ -96,28 +96,66 @@ const hourOf = (e) => {
   return null;
 };
 
-/* ---------- 좌표 → 장소명 (Nominatim 역지오코딩, API 키 불필요) ---------- */
+/* ---------- 좌표 → 장소명 (역지오코딩, API 키 불필요) ----------
+   1순위: BigDataCloud (클라이언트 전용 엔드포인트라 CORS·안정성이 좋고 한글 지명 지원)
+   2순위: Nominatim (OpenStreetMap) — BigDataCloud 실패 시 폴백
+   둘 다 실패하면 좌표 숫자 대신 빈 문자열을 반환한다. (예전엔 "37.5665, 126.9780"
+   같은 좌표가 그대로 노출돼 마치 "000.000"처럼 보이는 문제가 있었음) */
+
+/* BigDataCloud 응답의 행정구역 배열에서 시(4)·구(6)·동(8) 레벨을 골라 "시 구 동" 형태로 */
+const formatBigDataCloud = (d) => {
+  const admins = ((d && d.localityInfo && d.localityInfo.administrative) || [])
+    .filter((a) => a.adminLevel >= 4);
+  const pick = (level) => {
+    const hit = admins.find((a) => a.adminLevel === level);
+    return hit ? hit.name : "";
+  };
+  const parts = [
+    pick(4) || d.principalSubdivision || "",
+    pick(6) || d.city || "",
+    pick(8) || d.locality || "",
+  ];
+  const out = [];
+  for (const p of parts) if (p && p !== out[out.length - 1]) out.push(p);
+  return out.join(" ").trim();
+};
+
 const reverseGeocode = async (lat, lon) => {
+  // 1순위: BigDataCloud
+  try {
+    const r = await fetch(
+      `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=ko`
+    );
+    if (r.ok) {
+      const name = formatBigDataCloud(await r.json());
+      if (name) return name;
+    }
+  } catch {
+    /* 폴백으로 진행 */
+  }
+  // 2순위: Nominatim
   try {
     const r = await fetch(
       `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&accept-language=ko&zoom=16`,
       { headers: { Accept: "application/json" } }
     );
-    const d = await r.json();
-    const a = d.address || {};
-    const name = [
-      a.city || a.town || a.village || a.county || "",
-      a.borough || a.city_district || a.district || "",
-      a.suburb || a.neighbourhood || a.quarter || a.road || "",
-    ].filter(Boolean).join(" ").trim();
-    return (
-      name ||
-      (d.display_name ? d.display_name.split(",").slice(0, 2).map((s) => s.trim()).reverse().join(" ") : "") ||
-      `${(+lat).toFixed(4)}, ${(+lon).toFixed(4)}`
-    );
+    if (r.ok) {
+      const d = await r.json();
+      const a = d.address || {};
+      const name =
+        [
+          a.city || a.town || a.village || a.county || "",
+          a.borough || a.city_district || a.district || "",
+          a.suburb || a.neighbourhood || a.quarter || a.road || "",
+        ].filter(Boolean).join(" ").trim() ||
+        (d.display_name ? d.display_name.split(",").slice(0, 2).map((s) => s.trim()).reverse().join(" ") : "");
+      if (name) return name;
+    }
   } catch {
-    return `${(+lat).toFixed(4)}, ${(+lon).toFixed(4)}`;
+    /* 아래에서 빈 문자열 반환 */
   }
+  // 좌표 숫자는 노출하지 않는다.
+  return "";
 };
 
 /* ---------- GPS 현재 위치 → 장소명 ---------- */
@@ -1569,11 +1607,11 @@ function WritePage({ initial, onClose }) {
                   <span className={`text-xs font-medium ${T.sub}`}>날짜</span>
                   <input type="date" value={date} max={todayStr()}
                     onChange={(e) => setDate(e.target.value)}
-                    className={`mt-1 w-full ${T.input} rounded-xl px-3 py-2 text-sm outline-none ${T.text}`} />
+                    className={`mt-1 w-full ${T.input} rounded-xl px-3 h-10 text-sm outline-none ${T.text}`} />
                 </label>
                 <label className="block">
                   <span className={`text-xs font-medium ${T.sub}`}>위치</span>
-                  <div className={`mt-1 flex items-center gap-1.5 ${T.input} rounded-xl px-3 py-2`}>
+                  <div className={`mt-1 flex items-center gap-1.5 ${T.input} rounded-xl px-3 h-10`}>
                     <MapPin size={14} className={T.sub} />
                     <input value={location}
                       onChange={(e) => { setLocation(e.target.value); setAutoFilled(false); setLocNote(null); }}
@@ -1640,6 +1678,7 @@ function WritePage({ initial, onClose }) {
                   style={{
                     backgroundColor: mood ? accent + "24" : (T.input.includes("#26272c") ? "#26272c" : "#eef0f3"),
                     boxShadow: mood ? `inset 0 0 0 2px ${accent}` : "none",
+                    fontSize: "1.2rem", // text-2xl(1.5rem)의 80%로 축소
                   }}
                   title="기분 이모지 선택">
                   {mood ? mood : <Plus size={20} className={T.sub} />}
