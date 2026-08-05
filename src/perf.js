@@ -95,6 +95,7 @@ export function mergeStats(stats) {
 export function reportText() {
   const { timeline, counters: c } = report();
   const lines = ["[LifeLog 성능 진단]"];
+  lines.push(`빌드: ${typeof __BUILD_ID__ !== "undefined" ? __BUILD_ID__ : "unknown"}`);
   lines.push(`UA: ${typeof navigator !== "undefined" ? navigator.userAgent : "?"}`);
   lines.push("--- 타임라인 (페이지 시작 기준) ---");
   for (const r of timeline) {

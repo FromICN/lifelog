@@ -2028,6 +2028,10 @@ function SettingsModal({ onClose }) {
                 </div>
 
                 <div className={`rounded-xl px-3 py-2.5 text-[11px] font-mono space-y-1 ${T.input}`}>
+                  <div className="flex justify-between gap-2">
+                    <span className={T.sub}>빌드</span>
+                    <span className={T.text}>{typeof __BUILD_ID__ !== "undefined" ? __BUILD_ID__ : "unknown"}</span>
+                  </div>
                   {perf.timeline.map((r) => (
                     <div key={r.구간} className="flex justify-between gap-2">
                       <span className={T.sub}>{r.구간}</span>
