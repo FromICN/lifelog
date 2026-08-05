@@ -17,7 +17,7 @@
    셸을 강제로 새로 받게 하려면 SHELL_VERSION만 올리면 됩니다.
    ================================================================ */
 
-const SHELL_VERSION = "v2";
+const SHELL_VERSION = "v3";
 const SHELL_CACHE = `lifelog-shell-${SHELL_VERSION}`;
 const ASSET_CACHE = `lifelog-assets-${SHELL_VERSION}`;
 const PHOTO_CACHE = "lifelog-photos"; // 배포 버전과 무관하게 유지
@@ -59,6 +59,22 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("message", (e) => {
   if (e.data && e.data.type === "SKIP_WAITING") self.skipWaiting();
 });
+
+/* 새 셸이 도착하면 열려 있는 탭에 알려 준다(페이지가 1회 새로고침).
+   이전에는 "다음 실행에 반영"이었는데, 사용자가 배포 직후 확인하면
+   예전 버전이 보여 개선이 안 된 것처럼 느껴졌다. */
+let lastShellETag = null;
+async function notifyIfShellChanged(resp) {
+  try {
+    const tag = resp.headers.get("etag") || resp.headers.get("last-modified");
+    if (!tag) return;
+    if (lastShellETag === null) { lastShellETag = tag; return; }
+    if (tag === lastShellETag) return;
+    lastShellETag = tag;
+    const clients = await self.clients.matchAll({ type: "window" });
+    for (const c of clients) c.postMessage({ type: "SHELL_UPDATED" });
+  } catch { /* noop */ }
+}
 
 /* ---------------- 전략 ---------------- */
 
@@ -130,9 +146,18 @@ self.addEventListener("fetch", (event) => {
         const cache = await caches.open(SHELL_CACHE);
         const cached = (await cache.match(SHELL_URL)) || (await cache.match(SCOPE));
 
-        const network = fetch(request)
+        /* 반드시 HTTP 캐시를 우회한다.
+           GitHub Pages는 index.html에 `cache-control: max-age=600`을 붙이므로,
+           일반 fetch로는 10분간 예전 index.html이 그대로 돌아온다. 그걸 다시
+           셸 캐시에 넣으면 예전 자산 해시를 계속 가리키게 되어, 새로 배포해도
+           기기에는 영원히 반영되지 않는다(실제로 그렇게 되어 있었다). */
+        const network = fetch(request, { cache: "no-store" })
           .then((resp) => {
-            if (resp && resp.status === 200) cache.put(SHELL_URL, resp.clone());
+            if (resp && resp.status === 200) {
+              cache.put(SHELL_URL, resp.clone());
+              /* 셸이 실제로 바뀌었으면 열려 있는 탭에 알린다 */
+              notifyIfShellChanged(resp.clone());
+            }
             return resp;
           })
           .catch(() => null);
