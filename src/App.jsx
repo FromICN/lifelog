@@ -310,9 +310,15 @@ const useDiary = () => useContext(DiaryContext);
    - 캐시에 없으면 저장된 thumbURL(없으면 getDownloadURL)로 받아 로컬에 캐시
    - 원본(본문) 이미지는 로컬에 저장하지 않고 Storage에서 로드
    - loading=lazy·decoding=async, 로딩 중 스켈레톤, 만료 URL은 자동 재조회 */
-/* 썸네일 로컬 캐시 키 (warmThumbs와 StoragePhoto가 반드시 같은 키를 써야 함) */
+/* 썸네일 로컬 캐시 키 (warmThumbs와 StoragePhoto가 반드시 같은 키를 써야 함)
+
+   진단 결과 반영: 썸네일이 없는 사진은 캐시 키가 null이라 캐시 대상에서
+   아예 제외됐고, 그래서 매 접속마다 원본(약 400KB, 건당 ~2초)을 새로
+   받고 있었습니다. 썸네일이 없으면 원본 경로를 키로 써서 **화면에 실제로
+   표시하는 것을 그대로 캐시**합니다. 썸네일 복구가 안 되는 사진이라도
+   두 번째 접속부터는 즉시 뜹니다. */
 const thumbKeyOf = (img) =>
-  (img && img.type === "photo" && (img.thumbPath || img.thumbURL)) || null;
+  (img && img.type === "photo" && (img.thumbPath || img.thumbURL || img.path)) || null;
 
 /* 목록/캘린더에서 대표로 보여 주는 첫 사진의 썸네일 키들 */
 const listThumbKeys = (entries) =>
@@ -321,7 +327,8 @@ const listThumbKeys = (entries) =>
 function StoragePhoto({ img, thumb = false, className = "" }) {
   const isPhoto = img.type === "photo";
   const hasThumb = isPhoto && !!(img.thumbPath || img.thumbURL);
-  const useLocal = thumb && hasThumb && !img.preview;
+  /* 썸네일이 없어도 원본을 캐시한다(키 = 원본 경로) */
+  const useLocal = thumb && isPhoto && !!thumbKeyOf(img) && !img.preview;
   const cacheKey = useLocal ? thumbKeyOf(img) : null;
 
   const directURL =
@@ -350,8 +357,11 @@ function StoragePhoto({ img, thumb = false, className = "" }) {
       count("썸네일 지연로드");
       setUrl(null);
       loadThumb(cacheKey, async () => {
-        count("썸네일 네트워크 다운로드");
-        const u = img.thumbURL || (await getPhotoURL(img.thumbPath || img.path));
+        count(hasThumb ? "썸네일 네트워크 다운로드" : "원본 다운로드(썸네일 없음)");
+        let u;
+        if (img.thumbPath) u = img.thumbURL || (await getPhotoURL(img.thumbPath));
+        else if (img.thumbURL) u = img.thumbURL;
+        else u = img.url || (await getPhotoURL(img.path));
         const res = await fetch(u);
         if (!res.ok) {
           count("썸네일 다운로드 실패(HTTP)");
@@ -2372,7 +2382,10 @@ export default function LifeLogApp() {
      로컬 캐시를 아무리 고쳐도 이런 사진은 빨라지지 않습니다.
      그래서 설정의 '지금 최적화'와 같은 작업을 백그라운드에서 자동
      실행합니다. 하루 1회로 제한하고, 실패해도 앱 동작에는 영향 없습니다. */
-  const HEAL_KEY = "lifelog-last-heal";
+  /* 키를 v2로 바꿔 기존 24시간 잠금을 즉시 무효화한다.
+     (이전 버전은 실행 '전'에 시각을 기록해서, 한 번 실패하면 24시간 동안
+      재시도를 못 하고 잠겨 버렸습니다 — 진단의 "24시간 내 실행됨"이 그것) */
+  const HEAL_KEY = "lifelog-last-heal-v2";
   const healedRef = useRef(false);
   useEffect(() => {
     if (!entries.length || !user?.uid || healedRef.current) return;
@@ -2396,13 +2409,15 @@ export default function LifeLogApp() {
     healedRef.current = true;
     const run = async () => {
       try {
-        try { localStorage.setItem(HEAL_KEY, String(Date.now())); } catch { /* noop */ }
         const { backfillPhotos } = await migrateMod();
         const n = await backfillPhotos(user.uid);
+        /* 성공했을 때만 24시간 잠금을 건다. 실패하면 잠그지 않아
+           다음 접속에서 곧바로 다시 시도한다. */
+        try { localStorage.setItem(HEAL_KEY, String(Date.now())); } catch { /* noop */ }
         setInfo("자동 최적화", `사진 ${n}장 처리`);
         console.info(`[LifeLog] 썸네일 자동 최적화 완료: ${n}장`);
       } catch (e) {
-        setInfo("자동 최적화", `실패: ${e.message}`);
+        setInfo("자동 최적화", `실패: ${e.code || e.name}: ${e.message}`);
         console.warn("[LifeLog] 썸네일 자동 최적화 실패:", e);
       }
     };
@@ -2430,7 +2445,7 @@ export default function LifeLogApp() {
         const key = thumbKeyOf(img);
         if (!key || seen.has(key)) continue;
         seen.add(key);
-        items.push({ key, url: img.thumbURL || null });
+        items.push({ key, url: (key === img.thumbPath ? img.thumbURL : img.thumbURL || img.url) || null });
       }
     }
     if (!items.length) return;

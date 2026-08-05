@@ -12,6 +12,7 @@ import { db, getStorageLazy } from "./firebase";
 import { createLog } from "./db";
 import { compressThumb, compressMicro, thumbPathFor, primePhotoURL, IMG_CACHE_CONTROL } from "./photos";
 import { putThumb } from "./thumbcache";
+import { count, setInfo } from "./perf";
 
 const dataURLtoBlob = async (dataURL) => (await fetch(dataURL)).blob();
 
@@ -105,8 +106,13 @@ export async function backfillPhotos(uid, onProgress) {
         }
 
         next.push({ ...img, url: fullURL || img.url, thumbPath, thumbURL, micro });
+        count("백필 성공");
         changed = true;
       } catch (e) {
+        /* 왜 실패했는지 진단에 남긴다. Storage에 파일이 실제로 없으면
+           storage/object-not-found 가 찍힌다 → 그 사진은 복구 불가. */
+        count("백필 실패");
+        setInfo("백필 실패 원인", `${e.code || e.name}: ${e.message}`.slice(0, 120));
         console.error("사진 백필 실패:", img.path, e);
         next.push(img);
       } finally {
