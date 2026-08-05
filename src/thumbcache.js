@@ -27,6 +27,8 @@
 
    4) 캐시 상태 조회 (cacheStats) — 설정에서 실제 저장 여부를 확인
    ================================================================ */
+import { count, setInfo } from "./perf";
+
 const DB_NAME = "lifelog-thumbs";
 const STORE = "thumbs";
 const VERSION = 1;
@@ -118,9 +120,12 @@ async function idbPut(key, blob) {
       tx.onerror = () => rej(tx.error);
       tx.onabort = () => rej(tx.error);
     });
+    count("IDB 저장 성공");
     return true;
   } catch (e) {
     writeFailures++;
+    count("IDB 저장 실패");
+    setInfo("IDB 저장 실패 원인", e?.name || String(e));
     if (writeFailures <= 3) console.warn("썸네일 로컬 저장 실패:", e?.name || e);
     return false;
   }
@@ -294,18 +299,25 @@ export async function prefetchThumbs(items, resolveURL, onProgress) {
         const it = todo[i++];
         try {
           const url = it.url || (resolveURL ? await resolveURL(it.key) : null);
-          if (url) {
+          if (!url) { count("선다운로드 실패(URL 없음)"); }
+          else {
             const res = await fetch(url);
-            if (res.ok) {
+            if (!res.ok) {
+              count("선다운로드 실패(HTTP)");
+              setInfo("선다운로드 HTTP 상태", res.status);
+            } else {
               const blob = await res.blob();
               if (blob && blob.size) {
                 blobs.set(it.key, blob);
                 misses.delete(it.key);
                 if (await idbPut(it.key, blob)) ok++;
-              }
+              } else count("선다운로드 실패(빈 응답)");
             }
           }
-        } catch { /* 개별 실패는 건너뛴다 */ }
+        } catch (e) {
+          count("선다운로드 실패(예외)");
+          setInfo("선다운로드 예외", e?.name || String(e));
+        }
         onProgress?.(++done, todo.length);
       }
     };

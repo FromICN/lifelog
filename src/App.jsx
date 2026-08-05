@@ -16,7 +16,8 @@ import {
   loadThumb, peekThumbUrl, warmThumbs,
   warmAll, ensurePersistentStorage, prefetchThumbs, cacheStats, clearThumbCache,
 } from "./thumbcache";
-import { mark, count, setInfo, observeNetwork, report, reportText } from "./perf";
+import { mark, count, setInfo, observeNetwork, report, reportText, mergeStats } from "./perf";
+import { loadSnapshot, saveSnapshot, clearSnapshot } from "./localsnap";
 /* migrate.js(백업 가져오기·사진 최적화)는 설정에서만 쓰므로 동적 import.
    초기 번들에서 제외되어 첫 실행이 그만큼 빨라집니다. */
 const migrateMod = () => import("./migrate");
@@ -34,6 +35,9 @@ const bootWarm = warmAll().then((n) => {
   setInfo("로컬 썸네일 보유", n ?? 0);
   return n;
 });
+/* 마지막으로 본 일기 목록도 함께 읽는다. 인증(≈1초)과 Firestore를
+   기다리지 않고 캘린더를 즉시 그리기 위한 것. */
+const bootSnap = loadSnapshot();
 ensurePersistentStorage().then((ok) => setInfo("영구 저장소", ok ? "허용" : "미허용"));
 
 /* ================================================================
@@ -336,6 +340,10 @@ function StoragePhoto({ img, thumb = false, className = "" }) {
 
     if (img.preview) { setUrl(img.preview); return; }
 
+    /* 썸네일이 아예 없는 사진 = 매번 원본(최대 400KB)을 받아 표시한다.
+       캐시가 채워지지 않는 가장 흔한 원인이므로 따로 센다. */
+    if (thumb && !hasThumb && isPhoto) count("썸네일 없는 사진(원본 표시)");
+
     if (useLocal) {
       const mem = peekThumbUrl(cacheKey);
       if (mem) { count("썸네일 즉시표시(로컬)"); mark("6. 첫 썸네일 표시"); setUrl(mem); return; }
@@ -345,11 +353,22 @@ function StoragePhoto({ img, thumb = false, className = "" }) {
         count("썸네일 네트워크 다운로드");
         const u = img.thumbURL || (await getPhotoURL(img.thumbPath || img.path));
         const res = await fetch(u);
-        if (!res.ok) throw new Error("thumb fetch 실패");
+        if (!res.ok) {
+          count("썸네일 다운로드 실패(HTTP)");
+          setInfo("썸네일 HTTP 상태", res.status);
+          throw new Error("thumb fetch 실패 " + res.status);
+        }
         return await res.blob();
       })
-        .then((u) => { if (on) { mark("6. 첫 썸네일 표시"); setUrl(u || directURL || null); } })
-        .catch(() => { if (on) setUrl(directURL || null); });
+        .then((u) => {
+          if (!u) count("썸네일 확보 실패→원본 폴백");
+          if (on) { mark("6. 첫 썸네일 표시"); setUrl(u || directURL || null); }
+        })
+        .catch((e) => {
+          count("썸네일 다운로드 실패(예외)");
+          setInfo("썸네일 예외", e?.name || String(e));
+          if (on) setUrl(directURL || null);
+        });
       return () => { on = false; };
     }
 
@@ -1775,7 +1794,8 @@ function SettingsModal({ onClose }) {
   const [cacheProgress, setCacheProgress] = useState(null);
   const [cacheResult, setCacheResult] = useState(null);
 
-  const refreshStats = () => cacheStats().then(setStats).catch(() => {});
+  const refreshStats = () =>
+    cacheStats().then((s) => { setStats(s); mergeStats(s); setPerf(report()); }).catch(() => {});
   useEffect(() => { refreshStats(); }, []);
 
   /* 전체 일기의 썸네일 키 목록 */
@@ -2280,6 +2300,7 @@ export default function LifeLogApp() {
       mark("3b. 인증 확인 완료");
       setUser(u);
       writeBootUid(u ? u.uid : null);
+      if (!u) clearSnapshot();
     });
   }, []);
 
@@ -2287,16 +2308,36 @@ export default function LifeLogApp() {
      인증이 끝나 uid가 같으면 값이 안 바뀌므로 재구독도 없다. */
   const activeUid = user === undefined ? bootUid : user?.uid || null;
 
+  /* ── 로컬 스냅샷으로 즉시 렌더 ──────────────────────────────
+     인증(≈1초)과 Firestore를 기다리지 않고, 마지막으로 본 목록으로
+     캘린더를 먼저 그린다. 썸네일은 이미 메모리에 있으므로 함께 뜬다.
+     실제 데이터가 도착하면 아래 구독이 조용히 덮어쓴다. */
+  const liveArrived = useRef(false);
+  useEffect(() => {
+    let alive = true;
+    bootSnap.then((rec) => {
+      if (!alive || liveArrived.current || !rec) return;
+      if (!bootUid || rec.uid !== bootUid) return; // 다른 계정/로그아웃 상태면 무시
+      setEntries(rec.list);
+      mark("2b. 로컬 스냅샷으로 캘린더 렌더");
+      setInfo("스냅샷 렌더", `${rec.list.length}건`);
+    });
+    return () => { alive = false; };
+  }, [bootUid]);
+
   useEffect(() => {
     if (!activeUid) { setEntries([]); return; }
     let alive = true;
     let first = true;
+    mark("3c. Firestore 구독 시작");
 
     const unsub = subscribeLogs(
       activeUid,
       (list, meta) => {
         if (!alive) return;
+        liveArrived.current = true;
         const keys = listThumbKeys(list);
+        saveSnapshot(activeUid, list);
         if (first) {
           first = false;
           mark("4. Firestore 첫 목록 도착");
@@ -2320,6 +2361,54 @@ export default function LifeLogApp() {
     );
     return () => { alive = false; unsub(); };
   }, [activeUid]);
+
+  /* ── 썸네일이 없는 사진 자동 복구 ────────────────────────────
+     썸네일(thumbPath/thumbURL)이나 미리보기(micro)가 없는 사진은 캐시할
+     대상 자체가 없어서, 매 접속마다 원본(최대 400KB)을 새로 받습니다.
+     로컬 캐시를 아무리 고쳐도 이런 사진은 빨라지지 않습니다.
+     그래서 설정의 '지금 최적화'와 같은 작업을 백그라운드에서 자동
+     실행합니다. 하루 1회로 제한하고, 실패해도 앱 동작에는 영향 없습니다. */
+  const HEAL_KEY = "lifelog-last-heal";
+  const healedRef = useRef(false);
+  useEffect(() => {
+    if (!entries.length || !user?.uid || healedRef.current) return;
+
+    const needy = entries.reduce(
+      (n, e) => n + (e.images || []).filter(
+        (i) => i.type === "photo" && i.path && (!(i.thumbPath || i.thumbURL) || !i.micro)
+      ).length,
+      0
+    );
+    setInfo("최적화 필요한 사진", needy);
+    if (!needy) return;
+
+    let last = 0;
+    try { last = Number(localStorage.getItem(HEAL_KEY) || 0); } catch { /* noop */ }
+    if (Date.now() - last < 24 * 60 * 60 * 1000) {
+      setInfo("자동 최적화", "24시간 내 실행됨 (건너뜀)");
+      return;
+    }
+
+    healedRef.current = true;
+    const run = async () => {
+      try {
+        try { localStorage.setItem(HEAL_KEY, String(Date.now())); } catch { /* noop */ }
+        const { backfillPhotos } = await migrateMod();
+        const n = await backfillPhotos(user.uid);
+        setInfo("자동 최적화", `사진 ${n}장 처리`);
+        console.info(`[LifeLog] 썸네일 자동 최적화 완료: ${n}장`);
+      } catch (e) {
+        setInfo("자동 최적화", `실패: ${e.message}`);
+        console.warn("[LifeLog] 썸네일 자동 최적화 실패:", e);
+      }
+    };
+    const ric = window.requestIdleCallback;
+    const handle = ric ? ric(run, { timeout: 8000 }) : setTimeout(run, 5000);
+    return () => {
+      if (ric && window.cancelIdleCallback) window.cancelIdleCallback(handle);
+      else clearTimeout(handle);
+    };
+  }, [entries, user]);
 
   /* 백그라운드 선다운로드: 화면에 아직 안 뜬 썸네일(지난 달 캘린더·스크랩 등)
      까지 유휴 시간에 미리 받아 IndexedDB에 저장한다. 다음 접속부터는 어느

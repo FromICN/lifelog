@@ -83,6 +83,14 @@ export function report() {
   return { timeline, counters: Object.fromEntries(counters) };
 }
 
+/* 캐시 실측값을 리포트에 합쳐 넣기 (설정 화면에서 호출) */
+export function mergeStats(stats) {
+  if (!stats) return;
+  setInfo("IDB 실제 저장 수", stats.count);
+  setInfo("IDB 저장 용량", `${(stats.bytes / 1024).toFixed(0)}KB`);
+  setInfo("IDB 누적 쓰기 실패", stats.writeFailures);
+}
+
 /* 나에게 붙여넣기 좋은 한 덩어리 텍스트 */
 export function reportText() {
   const { timeline, counters: c } = report();
