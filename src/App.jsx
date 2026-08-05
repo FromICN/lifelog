@@ -14,7 +14,7 @@ import { subscribeLogs, createLog, updateLog, deleteLog, setScrap } from "./db";
 import { getPhotoURL, invalidatePhotoURL, probePhoto } from "./photos";
 import {
   loadThumb, peekThumbUrl, warmThumbs,
-  warmAll, ensurePersistentStorage, prefetchThumbs, cacheStats, clearThumbCache,
+  warmAll, ensurePersistentStorage, prefetchThumbs, cacheStats, clearThumbCache, isFetchBlocked,
 } from "./thumbcache";
 import { mark, count, setInfo, observeNetwork, report, reportText, mergeStats } from "./perf";
 import { loadSnapshot, saveSnapshot, clearSnapshot } from "./localsnap";
@@ -45,6 +45,7 @@ const bootSnap = loadSnapshot();
   try {
     setInfo("서비스워커", navigator.serviceWorker?.controller ? "제어중" : "없음");
     if (window.caches) setInfo("캐시 목록", (await caches.keys()).join(" / ") || "(없음)");
+    setTimeout(() => setInfo("Storage fetch 차단", isFetchBlocked() ? "예 (버킷 CORS 미설정)" : "아니오"), 6000);
   } catch { /* noop */ }
 })();
 ensurePersistentStorage().then((ok) => setInfo("영구 저장소", ok ? "허용" : "미허용"));
@@ -400,14 +401,31 @@ function StoragePhoto({ img, thumb = false, className = "" }) {
         }
       })
         .then((u) => {
-          if (!u) count("썸네일 확보 실패→원본 폴백");
-          if (on) { mark("6. 첫 썸네일 표시"); setUrl(u || directURL || null); }
+          if (u) { if (on) { mark("6. 첫 썸네일 표시"); setUrl(u); } return; }
+          count("썸네일 확보 실패→원본 폴백");
+          return showViaImgTag();
         })
         .catch((e) => {
           count("썸네일 다운로드 실패(예외)");
           setInfo("썸네일 예외", e?.name || String(e));
-          if (on) setUrl(directURL || null);
+          return showViaImgTag();
         });
+
+      /* blob으로 못 받아도 <img>는 no-cors라 표시된다.
+         문서에 URL이 저장돼 있지 않은 사진은 여기서 새로 발급받는다.
+         (이게 없어서 일부 사진이 영원히 스켈레톤 상태로 남아 있었다) */
+      async function showViaImgTag() {
+        if (!on) return;
+        if (directURL) { mark("6. 첫 썸네일 표시"); setUrl(directURL); return; }
+        try {
+          const u = await getPhotoURL(img.thumbPath || img.path);
+          if (on) { count("원본 URL 재발급으로 표시"); mark("6. 첫 썸네일 표시"); setUrl(u); }
+        } catch (err) {
+          count("표시 실패(사진 접근 불가)");
+          setInfo("표시 실패 원인", `${err.code || err.name}: ${err.message}`.slice(0, 90));
+          if (on) setUrl(null);
+        }
+      }
       return () => { on = false; };
     }
 
@@ -2486,6 +2504,11 @@ export default function LifeLogApp() {
     try { last = Number(localStorage.getItem(HEAL_KEY) || 0); } catch { /* noop */ }
     if (Date.now() - last < 24 * 60 * 60 * 1000) {
       setInfo("자동 최적화", "24시간 내 실행됨 (건너뜀)");
+      return;
+    }
+
+    if (isFetchBlocked()) {
+      setInfo("자동 최적화", "건너뜀 (Storage fetch 차단됨 — 버킷 CORS 설정 필요)");
       return;
     }
 

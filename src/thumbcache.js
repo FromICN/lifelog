@@ -143,6 +143,16 @@ const blobs = new Map();      // key → Blob        (warm 결과)
 const objectUrls = new Map(); // key → objectURL   (실제 표시된 것만)
 const misses = new Set();     // 로컬에 없다고 확인된 키 (중복 조회 방지)
 
+/* ---------- fetch 차단 감지 ----------
+   버킷에 CORS 설정이 없으면 브라우저가 이미지 바이트를 받는 cors fetch를
+   전부 거부합니다(TypeError: Failed to fetch). 이 상태에서 계속 재시도하면
+   매 접속마다 수십 초를 헛되이 쓰므로, 감지되면 그 세션에서는 중단합니다. */
+let fetchBlocked = false;
+export const isFetchBlocked = () => fetchBlocked;
+const noteFetchError = (e) => {
+  if (e instanceof TypeError) fetchBlocked = true;
+};
+
 /* ---------- 영구 저장소 (캐시가 지워지지 않게) ---------- */
 let persisted = null; // true | false | null(미확인)
 
@@ -237,11 +247,11 @@ export async function loadThumb(key, fetchBlob) {
   }
 
   let blob = misses.has(key) || allWarmed ? null : await idbGet(key);
-  if (!blob && typeof fetchBlob === "function") {
+  if (!blob && typeof fetchBlob === "function" && !fetchBlocked) {
     try {
       blob = await fetchBlob();
       if (blob) idbPut(key, blob);
-    } catch { blob = null; }
+    } catch (e) { noteFetchError(e); blob = null; }
   }
   if (!blob) { misses.add(key); return null; }
 
@@ -289,6 +299,8 @@ export async function prefetchThumbs(items, resolveURL, onProgress) {
     }
     if (!todo.length) { onProgress?.(0, 0); return 0; }
 
+    if (fetchBlocked) { count("선다운로드 중단(fetch 차단)"); return 0; }
+
     let done = 0;
     let ok = 0;
     let i = 0;
@@ -296,6 +308,7 @@ export async function prefetchThumbs(items, resolveURL, onProgress) {
 
     const worker = async () => {
       while (i < todo.length) {
+        if (fetchBlocked) return; // 차단 확인되면 나머지는 시도하지 않는다
         const it = todo[i++];
         try {
           const url = it.url || (resolveURL ? await resolveURL(it.key) : null);
@@ -315,6 +328,7 @@ export async function prefetchThumbs(items, resolveURL, onProgress) {
             }
           }
         } catch (e) {
+          noteFetchError(e);
           count("선다운로드 실패(예외)");
           setInfo("선다운로드 예외", e?.name || String(e));
         }
