@@ -17,13 +17,31 @@
    셸을 강제로 새로 받게 하려면 SHELL_VERSION만 올리면 됩니다.
    ================================================================ */
 
-const SHELL_VERSION = "v3";
+const SHELL_VERSION = "v4";
 const SHELL_CACHE = `lifelog-shell-${SHELL_VERSION}`;
 const ASSET_CACHE = `lifelog-assets-${SHELL_VERSION}`;
-const PHOTO_CACHE = "lifelog-photos"; // 배포 버전과 무관하게 유지
-const KEEP = [SHELL_CACHE, ASSET_CACHE, PHOTO_CACHE];
+/* ── 사진 캐시를 서비스워커에서 제거한 이유 (v4) ──────────────
+   진단에서 Storage로 나가는 fetch()가 100% "TypeError: Failed to fetch"로
+   실패하는데, 같은 URL을 <img>로 부르면 정상 표시되는 현상이 나왔습니다.
 
-const PHOTO_CACHE_MAX = 1200; // 항목 수 상한 (썸네일 ~40KB 기준 넉넉)
+   원인: 예전 버전 서비스워커가 <img>의 no-cors 요청에서 돌아온
+   **opaque 응답**을 lifelog-photos 캐시에 넣어 두었습니다. 이 캐시는
+   "배포 버전과 무관하게 유지"하도록 KEEP에 들어 있어서, 그 뒤 어떤 배포를
+   해도 절대 지워지지 않았습니다. cacheFirst는 요청 mode를 보지 않고 캐시된
+   응답을 그대로 돌려주므로, mode:'cors'로 나간 fetch()가 opaque 응답을
+   받게 되고 브라우저는 이를 TypeError로 거부합니다. <img>(no-cors)는
+   opaque를 그대로 받으니 멀쩡히 보이고요.
+
+   → 썸네일이 IndexedDB에 단 1장(10KB)만 쌓여 있던 진짜 이유가 이것입니다.
+     캐시 계층을 아무리 고쳐도, blob을 가져오는 fetch 자체가 매번
+     실패하고 있었으니 저장될 것이 없었습니다.
+
+   이제 사진 blob 캐시는 앱의 IndexedDB(thumbcache.js)가 전담합니다.
+   서비스워커가 중복으로 개입할 이유가 없고, 개입하면 이런 오염이
+   재발할 수 있으므로 아예 손대지 않습니다. 원본은 업로드 시 붙인
+   `immutable, 1년` 헤더 덕에 브라우저 HTTP 캐시가 처리합니다. */
+const POISONED_PHOTO_CACHE = "lifelog-photos"; // v4에서 삭제 대상
+const KEEP = [SHELL_CACHE, ASSET_CACHE];
 
 const SCOPE = self.registration.scope; // 예: https://fromicn.github.io/lifelog/
 const SHELL_URL = SCOPE + "index.html";
@@ -49,6 +67,8 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(
     (async () => {
       const keys = await caches.keys();
+      /* opaque 응답으로 오염된 예전 사진 캐시를 확실히 제거한다 */
+      await caches.delete(POISONED_PHOTO_CACHE);
       await Promise.all(keys.filter((k) => !KEEP.includes(k)).map((k) => caches.delete(k)));
       await self.clients.claim();
     })()
@@ -100,7 +120,10 @@ async function staleWhileRevalidate(request, cacheName) {
 async function cacheFirst(request, cacheName, limit) {
   const cache = await caches.open(cacheName);
   const cached = await cache.match(request);
-  if (cached) return cached;
+  /* opaque 응답을 cors 요청에 돌려주면 브라우저가 TypeError로 거부한다.
+     그런 항목은 무시하고 네트워크로 다시 받는다. */
+  const usable = cached && !(cached.type === "opaque" && request.mode === "cors");
+  if (usable) return cached;
   try {
     const resp = await fetch(request);
     if (resp && resp.status === 200) {
@@ -108,7 +131,7 @@ async function cacheFirst(request, cacheName, limit) {
     }
     return resp;
   } catch {
-    return cached || Response.error();
+    return (usable ? cached : null) || Response.error();
   }
 }
 
@@ -174,11 +197,11 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  /* 2) Firebase Storage 사진 → cache-first (별도 캐시, 배포와 무관하게 유지) */
-  if (host.includes("firebasestorage")) {
-    event.respondWith(cacheFirst(request, PHOTO_CACHE, PHOTO_CACHE_MAX));
-    return;
-  }
+  /* 2) Firebase Storage 사진 → 서비스워커가 관여하지 않는다.
+        blob 캐시는 앱의 IndexedDB가 담당하고, HTTP 캐시는 업로드 시 붙인
+        `immutable, 1년` 헤더가 담당한다. 여기서 가로채면 no-cors 응답이
+        cors 요청에 섞여 들어가는 오염이 재발한다. */
+  if (host.includes("firebasestorage")) return;
 
   /* 3) Google Fonts → 폰트 파일은 cache-first, CSS는 SWR */
   if (host === "fonts.gstatic.com") {
