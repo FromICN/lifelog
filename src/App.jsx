@@ -38,6 +38,15 @@ const bootWarm = warmAll().then((n) => {
 /* 마지막으로 본 일기 목록도 함께 읽는다. 인증(≈1초)과 Firestore를
    기다리지 않고 캘린더를 즉시 그리기 위한 것. */
 const bootSnap = loadSnapshot();
+
+/* 서비스워커 상태와 남아 있는 캐시 목록을 진단에 남긴다.
+   'lifelog-photos'가 목록에 보이면 오염된 예전 사진 캐시가 아직 살아 있다는 뜻. */
+(async () => {
+  try {
+    setInfo("서비스워커", navigator.serviceWorker?.controller ? "제어중" : "없음");
+    if (window.caches) setInfo("캐시 목록", (await caches.keys()).join(" / ") || "(없음)");
+  } catch { /* noop */ }
+})();
 ensurePersistentStorage().then((ok) => setInfo("영구 저장소", ok ? "허용" : "미허용"));
 
 /* ================================================================
