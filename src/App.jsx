@@ -16,6 +16,7 @@ import {
   loadThumb, peekThumbUrl, warmThumbs,
   warmAll, ensurePersistentStorage, prefetchThumbs, cacheStats, clearThumbCache,
 } from "./thumbcache";
+import { mark, count, setInfo, observeNetwork, report, reportText } from "./perf";
 /* migrate.js(백업 가져오기·사진 최적화)는 설정에서만 쓰므로 동적 import.
    초기 번들에서 제외되어 첫 실행이 그만큼 빨라집니다. */
 const migrateMod = () => import("./migrate");
@@ -25,10 +26,15 @@ const migrateMod = () => import("./migrate");
       Firestore 문서를 기다리지 않고 **병렬로** 진행되므로, 목록이 도착한
       순간 썸네일이 이미 준비돼 있어 첫 렌더부터 사진이 그려진다.
    2) 영구 저장소를 요청해 캐시가 브라우저에 의해 지워지지 않게 한다.
-      (요청하지 않으면 iOS Safari는 7일 미사용 시, 크롬은 용량 압박 시 삭제
-       → "접속할 때마다 썸네일을 다시 받는" 현상의 주원인) */
-const bootWarm = warmAll();
-ensurePersistentStorage();
+      (요청하지 않으면 iOS Safari는 7일 미사용 시, 크롬은 용량 압박 시 삭제) */
+mark("1. JS 번들 실행 시작");
+observeNetwork();
+const bootWarm = warmAll().then((n) => {
+  mark("2. 썸네일 캐시 로드 완료");
+  setInfo("로컬 썸네일 보유", n ?? 0);
+  return n;
+});
+ensurePersistentStorage().then((ok) => setInfo("영구 저장소", ok ? "허용" : "미허용"));
 
 /* ================================================================
    LifeLog — "DayPic 스타일" 리디자인
@@ -332,15 +338,17 @@ function StoragePhoto({ img, thumb = false, className = "" }) {
 
     if (useLocal) {
       const mem = peekThumbUrl(cacheKey);
-      if (mem) { setUrl(mem); return; }
+      if (mem) { count("썸네일 즉시표시(로컬)"); mark("6. 첫 썸네일 표시"); setUrl(mem); return; }
+      count("썸네일 지연로드");
       setUrl(null);
       loadThumb(cacheKey, async () => {
+        count("썸네일 네트워크 다운로드");
         const u = img.thumbURL || (await getPhotoURL(img.thumbPath || img.path));
         const res = await fetch(u);
         if (!res.ok) throw new Error("thumb fetch 실패");
         return await res.blob();
       })
-        .then((u) => { if (on) setUrl(u || directURL || null); })
+        .then((u) => { if (on) { mark("6. 첫 썸네일 표시"); setUrl(u || directURL || null); } })
         .catch(() => { if (on) setUrl(directURL || null); });
       return () => { on = false; };
     }
@@ -1811,6 +1819,19 @@ function SettingsModal({ onClose }) {
 
   const mb = (n) => (n == null ? "?" : `${(n / (1024 * 1024)).toFixed(1)}MB`);
 
+  /* ---------- 성능 진단 ---------- */
+  const [perf, setPerf] = useState(() => report());
+  const [copied, setCopied] = useState(false);
+  useEffect(() => { setPerf(report()); }, []);
+
+  const handleCopyPerf = async () => {
+    const text = reportText();
+    try { await navigator.clipboard.writeText(text); }
+    catch { console.log(text); }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
   const handleBackfill = async () => {
     if (backfilling) return;
     setBackfilling(true); setBackfillResult(null); setBackfillProgress(null);
@@ -1976,6 +1997,41 @@ function SettingsModal({ onClose }) {
                     {cacheResult.startsWith("✅") && <Check size={13} />}{cacheResult}
                   </div>
                 )}
+              </div>
+
+              <div className={`pt-3 mt-1 border-t ${T.border} space-y-3`}>
+                <div>
+                  <div className={`text-sm ${T.text}`}>성능 진단</div>
+                  <div className={`text-xs ${T.sub}`}>
+                    이번 접속에서 각 단계가 실제로 몇 ms 걸렸는지 기록한 값입니다. 어느 구간이 느린지 여기서 확인할 수 있어요.
+                  </div>
+                </div>
+
+                <div className={`rounded-xl px-3 py-2.5 text-[11px] font-mono space-y-1 ${T.input}`}>
+                  {perf.timeline.map((r) => (
+                    <div key={r.구간} className="flex justify-between gap-2">
+                      <span className={T.sub}>{r.구간}</span>
+                      <span className={T.text}>
+                        {r.누적ms}ms <span className={T.sub}>(+{r.직전대비ms})</span>
+                      </span>
+                    </div>
+                  ))}
+                  {Object.entries(perf.counters).length > 0 && (
+                    <div className={`pt-1.5 mt-1.5 border-t ${T.border} space-y-1`}>
+                      {Object.entries(perf.counters).map(([k, v]) => (
+                        <div key={k} className="flex justify-between gap-2">
+                          <span className={T.sub}>{k}</span>
+                          <span className={T.text}>{v}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <button onClick={handleCopyPerf}
+                  className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium border ${T.border} ${T.text} hover:opacity-80`}>
+                  <Check size={15} />{copied ? "복사됨!" : "진단 결과 복사"}
+                </button>
               </div>
             </div>
           </Section>
@@ -2218,8 +2274,10 @@ export default function LifeLogApp() {
   }, [dark]);
 
   useEffect(() => {
+    mark("3. React 마운트 완료");
     if (!CONFIG_READY) return;
     return onAuthStateChanged(auth, (u) => {
+      mark("3b. 인증 확인 완료");
       setUser(u);
       writeBootUid(u ? u.uid : null);
     });
@@ -2236,11 +2294,14 @@ export default function LifeLogApp() {
 
     const unsub = subscribeLogs(
       activeUid,
-      (list) => {
+      (list, meta) => {
         if (!alive) return;
         const keys = listThumbKeys(list);
         if (first) {
           first = false;
+          mark("4. Firestore 첫 목록 도착");
+          setInfo("일기 수", list.length);
+          setInfo("문서 출처", meta?.fromCache ? "로컬 캐시" : "서버(네트워크)");
           /* 부팅 시 시작한 전체 워밍(bootWarm)은 Firestore 왕복과 병렬로
              돌았으므로 대개 이 시점엔 이미 끝나 있다. 아주 느린 기기를
              대비해 250ms 상한만 둔다. */
@@ -2248,6 +2309,7 @@ export default function LifeLogApp() {
             if (!alive) return;
             warmThumbs(keys);
             setEntries(list);
+            mark("5. 캘린더 렌더 시작");
           });
         } else {
           setEntries(list);

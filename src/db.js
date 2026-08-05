@@ -25,12 +25,18 @@ import { uploadPhoto, deletePhoto } from "./photos";
 
 const logsCol = (uid) => collection(db, "users", uid, "logs");
 
-/* 실시간 구독: onSnapshot (오프라인 캐시 포함) → unsubscribe 반환 */
+/* 실시간 구독: onSnapshot (오프라인 캐시 포함) → unsubscribe 반환
+   onData(list, meta) — meta.fromCache 로 로컬 캐시 적중 여부를 알 수 있다
+   (문서가 서버에서 오고 있으면 캘린더 자체가 늦게 그려진다) */
 export function subscribeLogs(uid, onData, onError) {
   const q = query(logsCol(uid), orderBy("date", "desc"));
   return onSnapshot(
     q,
-    (snap) => onData(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+    (snap) =>
+      onData(
+        snap.docs.map((d) => ({ id: d.id, ...d.data() })),
+        { fromCache: snap.metadata.fromCache, size: snap.size }
+      ),
     onError
   );
 }

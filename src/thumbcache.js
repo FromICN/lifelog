@@ -162,8 +162,9 @@ export function warmAll() {
     .then((found) => {
       for (const [k, v] of found) if (!blobs.has(k)) blobs.set(k, v);
       allWarmed = true;
+      return found.size;
     })
-    .catch(() => { allWarmed = true; });
+    .catch(() => { allWarmed = true; return 0; });
   warmPromise = warmPromise.then(() => allWarmPromise).catch(() => {});
   return allWarmPromise;
 }
