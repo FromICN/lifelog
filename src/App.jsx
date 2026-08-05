@@ -12,10 +12,23 @@ import { auth, CONFIG_READY, signInWithGoogle, logOut } from "./firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import { subscribeLogs, createLog, updateLog, deleteLog, setScrap } from "./db";
 import { getPhotoURL, invalidatePhotoURL } from "./photos";
-import { loadThumb, peekThumbUrl, warmThumbs } from "./thumbcache";
+import {
+  loadThumb, peekThumbUrl, warmThumbs,
+  warmAll, ensurePersistentStorage, prefetchThumbs, cacheStats, clearThumbCache,
+} from "./thumbcache";
 /* migrate.js(백업 가져오기·사진 최적화)는 설정에서만 쓰므로 동적 import.
    초기 번들에서 제외되어 첫 실행이 그만큼 빨라집니다. */
 const migrateMod = () => import("./migrate");
+
+/* ── 썸네일 즉시 표시를 위한 부팅 작업 (모듈 로드 시점 = React 렌더보다 먼저) ──
+   1) 로컬 썸네일 저장소 전체를 메모리로 끌어올린다.
+      Firestore 문서를 기다리지 않고 **병렬로** 진행되므로, 목록이 도착한
+      순간 썸네일이 이미 준비돼 있어 첫 렌더부터 사진이 그려진다.
+   2) 영구 저장소를 요청해 캐시가 브라우저에 의해 지워지지 않게 한다.
+      (요청하지 않으면 iOS Safari는 7일 미사용 시, 크롬은 용량 압박 시 삭제
+       → "접속할 때마다 썸네일을 다시 받는" 현상의 주원인) */
+const bootWarm = warmAll();
+ensurePersistentStorage();
 
 /* ================================================================
    LifeLog — "DayPic 스타일" 리디자인
@@ -1739,7 +1752,7 @@ function DetailModal({ detail, onClose }) {
 
 /* ---------- 설정 모달 ---------- */
 function SettingsModal({ onClose }) {
-  const { T, accent, dark, setDark, user } = useDiary();
+  const { T, accent, dark, setDark, user, entries } = useDiary();
   const importRef = useRef(null);
   const [importing, setImporting] = useState(false);
   const [importProgress, setImportProgress] = useState(null);
@@ -1747,6 +1760,56 @@ function SettingsModal({ onClose }) {
   const [backfilling, setBackfilling] = useState(false);
   const [backfillProgress, setBackfillProgress] = useState(null);
   const [backfillResult, setBackfillResult] = useState(null);
+
+  /* ---------- 썸네일 로컬 캐시 ---------- */
+  const [stats, setStats] = useState(null);
+  const [caching, setCaching] = useState(false);
+  const [cacheProgress, setCacheProgress] = useState(null);
+  const [cacheResult, setCacheResult] = useState(null);
+
+  const refreshStats = () => cacheStats().then(setStats).catch(() => {});
+  useEffect(() => { refreshStats(); }, []);
+
+  /* 전체 일기의 썸네일 키 목록 */
+  const thumbItems = useMemo(() => {
+    const out = [];
+    const seen = new Set();
+    for (const e of entries || []) {
+      for (const img of e.images || []) {
+        const key = thumbKeyOf(img);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        out.push({ key, url: img.thumbURL || null });
+      }
+    }
+    return out;
+  }, [entries]);
+
+  const handleCacheAll = async () => {
+    if (caching) return;
+    setCaching(true); setCacheResult(null); setCacheProgress(null);
+    try {
+      await ensurePersistentStorage();
+      const n = await prefetchThumbs(
+        thumbItems,
+        (key) => getPhotoURL(key),
+        (done, total) => setCacheProgress({ done, total })
+      );
+      setCacheResult(n === 0 ? "✅ 이미 모두 저장돼 있어요" : `✅ 썸네일 ${n}장 저장 완료`);
+    } catch (e) {
+      setCacheResult(`저장 실패: ${e.message}`);
+    } finally {
+      setCaching(false); setCacheProgress(null); refreshStats();
+    }
+  };
+
+  const handleClearCache = async () => {
+    await clearThumbCache();
+    setCacheResult("로컬 캐시를 비웠습니다");
+    refreshStats();
+  };
+
+  const mb = (n) => (n == null ? "?" : `${(n / (1024 * 1024)).toFixed(1)}MB`);
 
   const handleBackfill = async () => {
     if (backfilling) return;
@@ -1857,6 +1920,60 @@ function SettingsModal({ onClose }) {
                 {backfillResult && (
                   <div className={`text-xs flex items-center gap-1 ${backfillResult.startsWith("✅") ? "text-emerald-600" : "text-red-500"}`}>
                     {backfillResult.startsWith("✅") && <Check size={13} />}{backfillResult}
+                  </div>
+                )}
+              </div>
+
+              <div className={`pt-3 mt-1 border-t ${T.border} space-y-3`}>
+                <div>
+                  <div className={`text-sm ${T.text}`}>썸네일 로컬 저장</div>
+                  <div className={`text-xs ${T.sub}`}>
+                    캘린더·격자·피드·스크랩의 썸네일을 기기에 저장해 <b>다음 접속부터는 다시 받지 않습니다.</b> 평소엔 백그라운드에서 자동으로 채워지고, 아래 버튼으로 지금 한 번에 받을 수도 있어요.
+                  </div>
+                </div>
+
+                <div className={`rounded-xl px-3 py-2.5 text-xs space-y-1 ${T.input}`}>
+                  <div className="flex justify-between">
+                    <span className={T.sub}>저장된 썸네일</span>
+                    <span className={T.text}>
+                      {stats ? `${stats.count} / ${thumbItems.length}장` : "확인 중..."}
+                      {stats && stats.count > 0 ? ` · ${mb(stats.bytes)}` : ""}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className={T.sub}>영구 저장소</span>
+                    <span className={stats?.persisted ? "text-emerald-600" : T.text}>
+                      {stats == null ? "확인 중..." : stats.persisted ? "허용됨 (삭제되지 않음)" : "미허용 — 브라우저가 캐시를 지울 수 있어요"}
+                    </span>
+                  </div>
+                  {stats?.quota != null && (
+                    <div className="flex justify-between">
+                      <span className={T.sub}>기기 저장 공간</span>
+                      <span className={T.text}>{mb(stats.usage)} / {mb(stats.quota)}</span>
+                    </div>
+                  )}
+                  {stats?.writeFailures > 0 && (
+                    <div className="text-red-500">저장 실패 {stats.writeFailures}회 — 저장 공간이 부족하거나 시크릿 모드일 수 있어요</div>
+                  )}
+                </div>
+
+                <div className="flex gap-2">
+                  <button onClick={handleCacheAll} disabled={caching}
+                    className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium border ${T.border} ${T.text} disabled:opacity-40 hover:opacity-80`}>
+                    {caching ? <Loader2 size={15} className="animate-spin" /> : <UploadCloud size={15} className="rotate-180" />}
+                    {caching
+                      ? (cacheProgress ? `받는 중... ${cacheProgress.done}/${cacheProgress.total}` : "받는 중...")
+                      : "지금 전부 받기"}
+                  </button>
+                  <button onClick={handleClearCache} disabled={caching}
+                    className={`px-3 rounded-xl text-sm font-medium border ${T.border} ${T.sub} disabled:opacity-40 hover:opacity-80`}
+                    title="로컬 썸네일 캐시 비우기">
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+                {cacheResult && (
+                  <div className={`text-xs flex items-center gap-1 ${cacheResult.startsWith("✅") ? "text-emerald-600" : T.sub}`}>
+                    {cacheResult.startsWith("✅") && <Check size={13} />}{cacheResult}
                   </div>
                 )}
               </div>
@@ -2124,11 +2241,13 @@ export default function LifeLogApp() {
         const keys = listThumbKeys(list);
         if (first) {
           first = false;
-          /* 첫 스냅샷만: 썸네일을 IndexedDB에서 한 번에 읽어 두고 그린다.
-             → 사진이 스켈레톤 → 이미지로 깜빡이지 않고 처음부터 채워진 채 뜬다.
-             로컬 읽기가 느린 기기를 대비해 250ms 상한을 둔다. */
-          Promise.race([warmThumbs(keys), delay(250)]).then(() => {
-            if (alive) setEntries(list);
+          /* 부팅 시 시작한 전체 워밍(bootWarm)은 Firestore 왕복과 병렬로
+             돌았으므로 대개 이 시점엔 이미 끝나 있다. 아주 느린 기기를
+             대비해 250ms 상한만 둔다. */
+          Promise.race([bootWarm, delay(250)]).then(() => {
+            if (!alive) return;
+            warmThumbs(keys);
+            setEntries(list);
           });
         } else {
           setEntries(list);
@@ -2139,6 +2258,41 @@ export default function LifeLogApp() {
     );
     return () => { alive = false; unsub(); };
   }, [activeUid]);
+
+  /* 백그라운드 선다운로드: 화면에 아직 안 뜬 썸네일(지난 달 캘린더·스크랩 등)
+     까지 유휴 시간에 미리 받아 IndexedDB에 저장한다. 다음 접속부터는 어느
+     탭으로 가도 네트워크를 타지 않는다. 첫 렌더를 방해하지 않도록
+     requestIdleCallback(없으면 2초 뒤)로 미룬다. */
+  const prefetchedRef = useRef(false);
+  useEffect(() => {
+    if (!entries.length || prefetchedRef.current) return;
+    prefetchedRef.current = true;
+
+    const items = [];
+    const seen = new Set();
+    for (const e of entries) {
+      for (const img of e.images || []) {
+        const key = thumbKeyOf(img);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        items.push({ key, url: img.thumbURL || null });
+      }
+    }
+    if (!items.length) return;
+
+    let cancelled = false;
+    const run = () => {
+      if (cancelled) return;
+      prefetchThumbs(items, (key) => getPhotoURL(key)).catch(() => {});
+    };
+    const ric = window.requestIdleCallback;
+    const handle = ric ? ric(run, { timeout: 4000 }) : setTimeout(run, 2000);
+    return () => {
+      cancelled = true;
+      if (ric && window.cancelIdleCallback) window.cancelIdleCallback(handle);
+      else clearTimeout(handle);
+    };
+  }, [entries]);
 
   /* 테마 토큰 — DayPic 스타일 클린 화이트 (라이트/다크) */
   const T = dark

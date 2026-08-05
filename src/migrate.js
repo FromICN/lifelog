@@ -98,6 +98,8 @@ export async function backfillPhotos(uid, onProgress) {
           if (!srcBlob) {
             const u = thumbURL || fullURL || (await getDownloadURL(ref(storage, img.path)));
             srcBlob = await fetchBlob(u);
+            /* 이미 받은 썸네일이니 로컬 캐시에도 넣어 둔다(다운로드 낭비 방지) */
+            if (thumbURL) putThumb(thumbPath, srcBlob);
           }
           micro = await compressMicro(srcBlob);
         }
