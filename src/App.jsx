@@ -11,7 +11,7 @@ import {
 import { auth, CONFIG_READY, signInWithGoogle, logOut } from "./firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import { subscribeLogs, createLog, updateLog, deleteLog, setScrap } from "./db";
-import { getPhotoURL, invalidatePhotoURL } from "./photos";
+import { getPhotoURL, invalidatePhotoURL, probePhoto } from "./photos";
 import {
   loadThumb, peekThumbUrl, warmThumbs,
   warmAll, ensurePersistentStorage, prefetchThumbs, cacheStats, clearThumbCache,
@@ -367,17 +367,37 @@ function StoragePhoto({ img, thumb = false, className = "" }) {
       setUrl(null);
       loadThumb(cacheKey, async () => {
         count(hasThumb ? "썸네일 네트워크 다운로드" : "원본 다운로드(썸네일 없음)");
-        let u;
-        if (img.thumbPath) u = img.thumbURL || (await getPhotoURL(img.thumbPath));
-        else if (img.thumbURL) u = img.thumbURL;
-        else u = img.url || (await getPhotoURL(img.path));
-        const res = await fetch(u);
-        if (!res.ok) {
-          count("썸네일 다운로드 실패(HTTP)");
-          setInfo("썸네일 HTTP 상태", res.status);
-          throw new Error("thumb fetch 실패 " + res.status);
+        const path = img.thumbPath || img.path;
+
+        const grab = async (u) => {
+          const res = await fetch(u);
+          if (!res.ok) {
+            setInfo("썸네일 HTTP 상태", res.status);
+            throw new Error("HTTP " + res.status);
+          }
+          return await res.blob();
+        };
+
+        /* 문서에 저장된 URL을 먼저 쓰되, 실패하면 토큰이 죽은 것으로 보고
+           URL 캐시를 버리고 새로 발급받아 한 번 더 시도한다.
+           (getPhotoURL은 localStorage에 URL을 영구 보관하므로, 한 번 죽은
+            URL이 캐시되면 어떤 배포로도 스스로 회복되지 않았다) */
+        let stored;
+        if (img.thumbPath) stored = img.thumbURL;
+        else stored = img.thumbURL || img.url;
+
+        if (stored) {
+          try { return await grab(stored); }
+          catch (e) { count("저장된 URL 실패→재발급"); setInfo("저장 URL 실패", e.message); }
         }
-        return await res.blob();
+        try {
+          return await grab(await getPhotoURL(path));
+        } catch (e) {
+          count("URL 재발급 후에도 실패");
+          invalidatePhotoURL(path);
+          const fresh = await getPhotoURL(path);
+          return await grab(fresh);
+        }
       })
         .then((u) => {
           if (!u) count("썸네일 확보 실패→원본 폴백");
@@ -1858,13 +1878,49 @@ function SettingsModal({ onClose }) {
 
   const mb = (n) => (n == null ? "?" : `${(n / (1024 * 1024)).toFixed(1)}MB`);
 
+  /* ---------- 사진 접근 테스트 ---------- */
+  const [probing, setProbing] = useState(false);
+  const [probes, setProbes] = useState(null);
+
+  const handleProbe = async () => {
+    if (probing) return;
+    setProbing(true); setProbes(null);
+    const targets = [];
+    for (const e of entries || []) {
+      for (const img of e.images || []) {
+        if (img.type !== "photo" || !img.path) continue;
+        targets.push({
+          date: e.date,
+          path: img.thumbPath || img.path,
+          kind: img.thumbPath ? "썸네일" : "원본",
+          stored: img.thumbPath ? img.thumbURL : (img.thumbURL || img.url),
+        });
+      }
+    }
+    const out = [];
+    for (const t of targets) {
+      const r = await probePhoto(t.path, t.stored);
+      out.push({ ...t, ...r });
+    }
+    setProbes(out);
+    setProbing(false);
+  };
+
   /* ---------- 성능 진단 ---------- */
   const [perf, setPerf] = useState(() => report());
   const [copied, setCopied] = useState(false);
   useEffect(() => { setPerf(report()); }, []);
 
   const handleCopyPerf = async () => {
-    const text = reportText();
+    let text = reportText();
+    if (probes) {
+      text += "\n--- 사진 접근 테스트 ---\n";
+      for (const p of probes) {
+        text += `${p.date} ${p.kind} ${p.path.split("/").pop()}\n`;
+        text += `   저장된URL: ${p.storedURL ?? "(없음)"}\n`;
+        text += `   새발급URL: ${p.freshURL}\n`;
+      }
+    }
     try { await navigator.clipboard.writeText(text); }
     catch { console.log(text); }
     setCopied(true);
@@ -2070,6 +2126,24 @@ function SettingsModal({ onClose }) {
                     </div>
                   )}
                 </div>
+
+                <button onClick={handleProbe} disabled={probing}
+                  className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium border ${T.border} ${T.text} disabled:opacity-40 hover:opacity-80`}>
+                  {probing ? <Loader2 size={15} className="animate-spin" /> : <ImageIcon size={15} />}
+                  {probing ? "사진 접근 확인 중..." : "사진 접근 테스트"}
+                </button>
+
+                {probes && (
+                  <div className={`rounded-xl px-3 py-2.5 text-[11px] font-mono space-y-2 ${T.input}`}>
+                    {probes.map((p, i) => (
+                      <div key={i}>
+                        <div className={T.text}>{p.date} · {p.kind} · {p.path.split("/").pop()}</div>
+                        <div className={T.sub}>저장URL: {p.storedURL ?? "(없음)"}</div>
+                        <div className={T.sub}>새발급: {p.freshURL}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
 
                 <button onClick={handleCopyPerf}
                   className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium border ${T.border} ${T.text} hover:opacity-80`}>
@@ -2419,12 +2493,17 @@ export default function LifeLogApp() {
     const run = async () => {
       try {
         const { backfillPhotos } = await migrateMod();
-        const n = await backfillPhotos(user.uid);
-        /* 성공했을 때만 24시간 잠금을 건다. 실패하면 잠그지 않아
-           다음 접속에서 곧바로 다시 시도한다. */
-        try { localStorage.setItem(HEAL_KEY, String(Date.now())); } catch { /* noop */ }
-        setInfo("자동 최적화", `사진 ${n}장 처리`);
-        console.info(`[LifeLog] 썸네일 자동 최적화 완료: ${n}장`);
+        const r = await backfillPhotos(user.uid);
+        const n = typeof r === "number" ? r : r.done;
+        const failed = typeof r === "number" ? 0 : r.failed;
+        /* 실패가 하나도 없을 때만 24시간 잠금을 건다. 지난번에는
+           backfillPhotos가 사진별 실패를 내부에서 삼키고 정상 종료해서,
+           '0장 처리'인데도 24시간 잠겨 버렸다. */
+        if (!failed) {
+          try { localStorage.setItem(HEAL_KEY, String(Date.now())); } catch { /* noop */ }
+        }
+        setInfo("자동 최적화", `처리 ${n}장 / 실패 ${failed}장`);
+        console.info(`[LifeLog] 썸네일 자동 최적화: 처리 ${n} / 실패 ${failed}`);
       } catch (e) {
         setInfo("자동 최적화", `실패: ${e.code || e.name}: ${e.message}`);
         console.warn("[LifeLog] 썸네일 자동 최적화 실패:", e);

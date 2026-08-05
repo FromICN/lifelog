@@ -63,8 +63,9 @@ export async function backfillPhotos(uid, onProgress) {
     0
   );
   let done = 0;
+  let failed = 0;
   onProgress?.(0, total);
-  if (total === 0) return 0;
+  if (total === 0) return { done: 0, failed: 0 };
 
   const meta = { contentType: "image/webp", cacheControl: IMG_CACHE_CONTROL };
   const fetchBlob = async (url) => (await fetch(url)).blob();
@@ -112,6 +113,7 @@ export async function backfillPhotos(uid, onProgress) {
         /* 왜 실패했는지 진단에 남긴다. Storage에 파일이 실제로 없으면
            storage/object-not-found 가 찍힌다 → 그 사진은 복구 불가. */
         count("백필 실패");
+        failed++;
         setInfo("백필 실패 원인", `${e.code || e.name}: ${e.message}`.slice(0, 120));
         console.error("사진 백필 실패:", img.path, e);
         next.push(img);
@@ -123,5 +125,5 @@ export async function backfillPhotos(uid, onProgress) {
       await updateDoc(doc(db, "users", uid, "logs", d.id), { images: next });
     }
   }
-  return done;
+  return { done: done - failed, failed };
 }

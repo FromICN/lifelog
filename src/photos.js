@@ -161,6 +161,34 @@ export async function uploadPhoto(uid, logId, index, fileOrBlob) {
   return { path, url, thumbPath, thumbURL, micro: micro || undefined };
 }
 
+/* ---------- 사진 접근 진단 ----------
+   사진 1장에 대해 "문서에 적힌 URL"과 "지금 새로 발급한 URL"을 각각
+   실제로 받아 보고 결과를 돌려준다. Storage에 파일이 실제로 있는지,
+   저장된 URL의 토큰이 죽은 것인지를 구분하기 위한 것. */
+export async function probePhoto(path, storedURL) {
+  const out = { path, storedURL: null, freshURL: null };
+
+  const tryFetch = async (url) => {
+    try {
+      const res = await fetch(url);
+      return res.ok ? `OK ${res.status}` : `HTTP ${res.status}`;
+    } catch (e) {
+      return `${e.name}: ${e.message}`.slice(0, 60);
+    }
+  };
+
+  if (storedURL) out.storedURL = await tryFetch(storedURL);
+
+  try {
+    invalidatePhotoURL(path);              // 캐시된 URL 무시하고 새로 발급
+    const fresh = await getPhotoURL(path);
+    out.freshURL = await tryFetch(fresh);
+  } catch (e) {
+    out.freshURL = `발급실패 ${e.code || e.name}: ${e.message}`.slice(0, 80);
+  }
+  return out;
+}
+
 /* 삭제 (없는 파일 등 오류는 무시) */
 export function deletePhoto(path) {
   invalidatePhotoURL(path);
