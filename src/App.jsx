@@ -640,9 +640,17 @@ function MonthHeader({ overline, right }) {
 
 const WEEKDAYS = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
 
+/* 월 이동 (연도 넘김 처리) */
+const shiftMonth = (s, dir) => {
+  const m = s.m + dir;
+  if (m < 0) return { y: s.y - 1, m: 11 };
+  if (m > 11) return { y: s.y + 1, m: 0 };
+  return { y: s.y, m };
+};
+
 /* ---------- 캘린더 뷰 (홈) — 사진 셀 ---------- */
 function CalendarView() {
-  const { T, accent, month, monthEntries, openDay } = useDiary();
+  const { T, month, setMonth, monthEntries, openDay } = useDiary();
   const byDate = useMemo(() => {
     const map = {};
     monthEntries.forEach((e) => { (map[e.date] = map[e.date] || []).push(e); });
@@ -653,8 +661,25 @@ function CalendarView() {
   const days = new Date(month.y, month.m + 1, 0).getDate();
   const cells = [...Array(first).fill(null), ...Array.from({ length: days }, (_, i) => i + 1)];
 
+  /* 좌우 드래그로 달 이동 (왼쪽=다음 달, 오른쪽=이전 달). 세로 스크롤은 그대로. */
+  const down = useRef(null);
+  const swiped = useRef(false);
+  const onDown = (e) => { down.current = { x: e.clientX, y: e.clientY }; swiped.current = false; };
+  const onUp = (e) => {
+    if (!down.current) return;
+    const dx = e.clientX - down.current.x;
+    const dy = e.clientY - down.current.y;
+    down.current = null;
+    if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+      swiped.current = true; // 이어지는 셀 클릭 무시
+      setMonth((s) => shiftMonth(s, dx < 0 ? 1 : -1));
+    }
+  };
+  const tapDay = (list) => { if (swiped.current) { swiped.current = false; return; } openDay(list); };
+
   return (
-    <div className="px-3 mt-4">
+    <div className="px-3 mt-4" style={{ touchAction: "pan-y" }}
+      onPointerDown={onDown} onPointerUp={onUp} onPointerCancel={() => (down.current = null)}>
       <div className="grid grid-cols-7 mb-2">
         {WEEKDAYS.map((d, i) => (
           <div key={d} className={`text-center text-[11px] font-semibold py-1 ${i === 0 ? "text-red-400" : T.sub}`}>{d}</div>
@@ -665,23 +690,19 @@ function CalendarView() {
           if (!day) return <div key={`e${i}`} className="aspect-square" />;
           const key = `${month.y}-${pad2(month.m + 1)}-${pad2(day)}`;
           const list = byDate[key];
-          const isToday = key === todayStr();
           if (!list) {
             return (
-              <div key={key}
-                className={`aspect-square rounded-lg flex items-start justify-start p-1 ${isToday ? "ring-2" : ""}`}
-                style={isToday ? { boxShadow: `inset 0 0 0 2px ${accent}` } : undefined}>
+              <div key={key} className="aspect-square rounded-lg flex items-start justify-start p-1">
                 <span className={`text-[11px] ${T.sub} opacity-60`}>{day}</span>
               </div>
             );
           }
           return (
-            <button key={key} onClick={() => openDay(list)}
-              className={`relative aspect-square rounded-lg overflow-hidden group ${isToday ? "ring-2" : ""}`}
-              style={isToday ? { boxShadow: `0 0 0 2px ${accent}` } : undefined}>
+            <button key={key} onClick={() => tapDay(list)}
+              className="relative aspect-square rounded-lg overflow-hidden group">
               <Img img={list[0].images[0]} thumb />
               <div className="absolute inset-0 bg-gradient-to-b from-black/45 via-transparent to-transparent" />
-              <span className="absolute top-1 left-1.5 text-[11px] font-bold text-white drop-shadow">{day}</span>
+              <span className="absolute top-1 left-1.5 text-[11px] font-medium text-white drop-shadow">{day}</span>
               {(list.length > 1 || list[0].images.length > 1) && (
                 <Layers size={13} className="absolute top-1 right-1 text-white drop-shadow" />
               )}
@@ -697,7 +718,7 @@ function CalendarView() {
 function GridView() {
   const { T, monthEntries, openEntry } = useDiary();
   const sorted = useMemo(
-    () => [...monthEntries].sort((a, b) => b.date.localeCompare(a.date)),
+    () => [...monthEntries].sort((a, b) => a.date.localeCompare(b.date)),
     [monthEntries]
   );
   if (sorted.length === 0) return <EmptyMonth T={T} />;
@@ -706,8 +727,6 @@ function GridView() {
       {sorted.map((e) => (
         <button key={e.id} onClick={() => openEntry(e)} className="relative aspect-square rounded-lg overflow-hidden group">
           <Img img={e.images[0]} thumb />
-          <div className="absolute inset-0 bg-gradient-to-b from-black/45 via-transparent to-transparent" />
-          <span className="absolute top-1.5 left-2 text-xs font-bold text-white drop-shadow">{+e.date.slice(8)}</span>
           {e.images.length > 1 && <Layers size={14} className="absolute top-1.5 right-1.5 text-white drop-shadow" />}
         </button>
       ))}
@@ -746,17 +765,13 @@ const HOME_TABS = [
   { id: "feed", icon: Rows, label: "피드" },
 ];
 function HomeView() {
-  const { T, accent, dark } = useDiary();
+  const { T, accent } = useDiary();
   const [tab, setTab] = useState("calendar"); // calendar | grid | feed
   return (
-    <div className="mt-2">
-      {tab === "calendar" && <CalendarView />}
-      {tab === "grid" && <GridView />}
-      {tab === "feed" && <FeedView />}
-      {/* 캘린더·격자·피드 탭을 엄지가 닿기 쉬운 하단(전역 내비 바 위)에 띄운다 */}
-      <div className="fixed inset-x-0 bottom-[74px] z-30 flex justify-center pointer-events-none">
-        <div className="pointer-events-auto inline-flex p-0.5 rounded-full shadow-lg backdrop-blur"
-          style={{ backgroundColor: dark ? "rgba(38,39,44,0.92)" : "rgba(255,255,255,0.92)", boxShadow: "0 4px 16px rgba(0,0,0,0.18)" }}>
+    <div className="mt-3">
+      {/* 캘린더·격자·피드 탭 — 캘린더 상단 */}
+      <div className="px-4 flex justify-center">
+        <div className={`inline-flex rounded-full ${T.input}`}>
           {HOME_TABS.map(({ id, icon: Icon, label }) => {
             const on = tab === id;
             return (
@@ -769,8 +784,10 @@ function HomeView() {
           })}
         </div>
       </div>
-      {/* 떠 있는 탭에 콘텐츠가 가리지 않도록 하단 여백 */}
-      <div className="h-14" />
+      {tab === "calendar" && <CalendarView />}
+      {tab === "grid" && <GridView />}
+      {tab === "feed" && <FeedView />}
+      <div className="h-2" />
     </div>
   );
 }
@@ -1617,29 +1634,19 @@ function WritePage({ initial, onClose }) {
             {/* ===== 오늘의 건강 ===== */}
             <div className="space-y-3">
               <SectionTitle icon={HeartPulse} title="오늘의 건강" accent={accent} T={T} />
-              {/* 마음: [+ 이모지] + 입력창 */}
-              <div>
-                <span className={`text-xs font-medium ${T.sub}`}>마음</span>
-                <div className="mt-1 flex items-stretch gap-2">
-                  <button type="button" onClick={() => setPickMood(true)}
-                    className="w-12 flex-shrink-0 rounded-xl flex items-center justify-center text-2xl"
-                    style={{
-                      backgroundColor: mood ? accent + "24" : (T.input.includes("#26272c") ? "#26272c" : "#eef0f3"),
-                      boxShadow: mood ? `inset 0 0 0 2px ${accent}` : "none",
-                    }}
-                    title="기분 이모지 선택">
-                    {mood ? mood : <Plus size={20} className={T.sub} />}
-                  </button>
-                  <input value={mind} onChange={(e) => setMind(e.target.value)}
-                    placeholder="마음은 어땠나요?"
-                    className={`flex-1 min-w-0 ${T.input} rounded-xl px-3 text-sm outline-none ${T.text}`} />
-                </div>
-              </div>
-              {/* 몸 */}
-              <div>
-                <span className={`text-xs font-medium ${T.sub}`}>몸</span>
-                <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={2}
-                  placeholder="수면·운동·식사·컨디션 등" className={`mt-1 ${inputCls}`} />
+              <div className="flex items-stretch gap-2">
+                <button type="button" onClick={() => setPickMood(true)}
+                  className="w-12 flex-shrink-0 rounded-xl flex items-center justify-center text-2xl"
+                  style={{
+                    backgroundColor: mood ? accent + "24" : (T.input.includes("#26272c") ? "#26272c" : "#eef0f3"),
+                    boxShadow: mood ? `inset 0 0 0 2px ${accent}` : "none",
+                  }}
+                  title="기분 이모지 선택">
+                  {mood ? mood : <Plus size={20} className={T.sub} />}
+                </button>
+                <input value={mind} onChange={(e) => setMind(e.target.value)}
+                  placeholder="마음과 몸의 컨디션은 어땠나요?"
+                  className={`flex-1 min-w-0 ${T.input} rounded-xl px-3 py-2.5 text-sm outline-none ${T.text}`} />
               </div>
             </div>
 
