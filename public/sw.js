@@ -17,7 +17,7 @@
    셸을 강제로 새로 받게 하려면 SHELL_VERSION만 올리면 됩니다.
    ================================================================ */
 
-const SHELL_VERSION = "v4";
+const SHELL_VERSION = "v5";
 const SHELL_CACHE = `lifelog-shell-${SHELL_VERSION}`;
 const ASSET_CACHE = `lifelog-assets-${SHELL_VERSION}`;
 /* ── 사진 캐시를 서비스워커에서 제거한 이유 (v4) ──────────────
